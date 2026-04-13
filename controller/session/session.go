@@ -100,7 +100,7 @@ func CreateStreamSessionAndSendMessage(c *gin.Context) {
 	c.Header("X-Accel-Buffering", "no") // 禁止代理缓存
 
 	// 先创建会话并立即把 sessionId 下发给前端，随后再开始流式输出
-	sessionID, code_ := session.CreateStreamSessionOnly(userName, req.UserQuestion)
+	sessionID, code_ := session.CreateStreamSessionOnly(userName, req.UserQuestion, req.ModelType)
 	if code_ != code.CodeSuccess {
 		c.SSEvent("error", gin.H{"message": "Failed to create session"})
 		return

@@ -1,4 +1,4 @@
-package mcp
+package mcpserver
 
 import (
 	"context"
@@ -8,12 +8,87 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"sync"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 )
 
-//wttr.in JSON 响应结构
+// =================== Tool Registry ===================
+
+type ToolHandler func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error)
+
+type ToolEntry struct {
+	Tool    mcp.Tool
+	Handler ToolHandler
+}
+
+type ToolRegistry struct {
+	mu    sync.RWMutex
+	tools map[string]ToolEntry
+}
+
+func NewToolRegistry() *ToolRegistry {
+	return &ToolRegistry{
+		tools: make(map[string]ToolEntry),
+	}
+}
+
+func (r *ToolRegistry) Register(tool mcp.Tool, handler ToolHandler) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.tools[tool.Name] = ToolEntry{Tool: tool, Handler: handler}
+}
+
+func (r *ToolRegistry) Apply(s *server.MCPServer) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, entry := range r.tools {
+		s.AddTool(entry.Tool, server.ToolHandlerFunc(entry.Handler))
+	}
+}
+
+func (r *ToolRegistry) Count() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.tools)
+}
+
+// DefaultRegistry is the global tool registry. Register tools here before calling StartServer.
+var DefaultRegistry = NewToolRegistry()
+
+func init() {
+	registerBuiltinTools(DefaultRegistry)
+}
+
+// =================== MCP Server ===================
+
+func NewMCPServer() *server.MCPServer {
+	mcpServer := server.NewMCPServer(
+		"GopherAI-MCP-Server",
+		"2.0.0",
+		server.WithToolCapabilities(true),
+		server.WithLogging(),
+	)
+	DefaultRegistry.Apply(mcpServer)
+	return mcpServer
+}
+
+func StartServer(httpAddr string) error {
+	mcpServer := NewMCPServer()
+	httpServer := server.NewStreamableHTTPServer(mcpServer)
+	log.Printf("MCP server listening on %s/mcp (%d tools registered)", httpAddr, DefaultRegistry.Count())
+	return httpServer.Start(httpAddr)
+}
+
+// =================== Builtin Tools ===================
+
+func registerBuiltinTools(reg *ToolRegistry) {
+	registerWeatherTool(reg)
+	registerEmailTool(reg)
+}
+
+// --- Weather Tool ---
 
 type WttrResponse struct {
 	CurrentCondition []struct {
@@ -24,7 +99,6 @@ type WttrResponse struct {
 			Value string `json:"value"`
 		} `json:"weatherDesc"`
 	} `json:"current_condition"`
-
 	NearestArea []struct {
 		AreaName []struct {
 			Value string `json:"value"`
@@ -32,37 +106,29 @@ type WttrResponse struct {
 	} `json:"nearest_area"`
 }
 
-//统一对外天气结构
-
-type WeatherResponse struct {
-	Location    string  `json:"location"`
-	Temperature float64 `json:"temperature"`
-	Condition   string  `json:"condition"`
-	Humidity    int     `json:"humidity"`
-	WindSpeed   float64 `json:"windSpeed"`
-}
-
-//Weather API Client
-
-type WeatherAPIClient struct{}
-
-func NewWeatherAPIClient() *WeatherAPIClient {
-	return &WeatherAPIClient{}
-}
-
-func (c *WeatherAPIClient) GetWeather(ctx context.Context, city string) (*WeatherResponse, error) {
-	apiURL := fmt.Sprintf(
-		"https://wttr.in/%s?format=j1&lang=zh",
-		city,
+func registerWeatherTool(reg *ToolRegistry) {
+	tool := mcp.NewTool(
+		"get_weather",
+		mcp.WithDescription("获取指定城市的实时天气信息，包括温度、湿度、风速等"),
+		mcp.WithString("city", mcp.Description("城市名称，如 Beijing、上海"), mcp.Required()),
 	)
+	reg.Register(tool, handleGetWeather)
+}
 
+func handleGetWeather(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := request.GetArguments()
+	city, ok := args["city"].(string)
+	if !ok || city == "" {
+		return nil, fmt.Errorf("invalid city argument")
+	}
+
+	apiURL := fmt.Sprintf("https://wttr.in/%s?format=j1&lang=zh", city)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("create request failed: %w", err)
 	}
 
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("http request failed: %w", err)
 	}
@@ -79,102 +145,62 @@ func (c *WeatherAPIClient) GetWeather(ctx context.Context, city string) (*Weathe
 	}
 
 	if len(wttrResp.CurrentCondition) == 0 {
-		return nil, fmt.Errorf("no weather data")
+		return nil, fmt.Errorf("no weather data for city: %s", city)
 	}
 
 	cc := wttrResp.CurrentCondition[0]
-
 	temp, _ := strconv.ParseFloat(cc.TempC, 64)
 	humidity, _ := strconv.Atoi(cc.Humidity)
 	wind, _ := strconv.ParseFloat(cc.WindspeedKmph, 64)
 
 	location := city
-	if len(wttrResp.NearestArea) > 0 &&
-		len(wttrResp.NearestArea[0].AreaName) > 0 {
+	if len(wttrResp.NearestArea) > 0 && len(wttrResp.NearestArea[0].AreaName) > 0 {
 		location = wttrResp.NearestArea[0].AreaName[0].Value
 	}
-
 	condition := "未知"
 	if len(cc.WeatherDesc) > 0 {
 		condition = cc.WeatherDesc[0].Value
 	}
 
-	return &WeatherResponse{
-		Location:    location,
-		Temperature: temp,
-		Condition:   condition,
-		Humidity:    humidity,
-		WindSpeed:   wind,
+	resultText := fmt.Sprintf(
+		"城市: %s\n温度: %.1f°C\n天气: %s\n湿度: %d%%\n风速: %.1f km/h",
+		location, temp, condition, humidity, wind,
+	)
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{
+			mcp.TextContent{Type: "text", Text: resultText},
+		},
 	}, nil
 }
 
-/*
-	========================
-	MCP Server
-	========================
-*/
+// --- Email Tool (stub: uses project's existing email infrastructure) ---
 
-func NewMCPServer() *server.MCPServer {
-	weatherClient := NewWeatherAPIClient()
-
-	mcpServer := server.NewMCPServer(
-		"weather-query-server",
-		"1.0.0",
-		server.WithToolCapabilities(true),
-		server.WithLogging(),
+func registerEmailTool(reg *ToolRegistry) {
+	tool := mcp.NewTool(
+		"send_email",
+		mcp.WithDescription("发送邮件给指定收件人"),
+		mcp.WithString("to", mcp.Description("收件人邮箱地址"), mcp.Required()),
+		mcp.WithString("subject", mcp.Description("邮件主题"), mcp.Required()),
+		mcp.WithString("body", mcp.Description("邮件正文内容"), mcp.Required()),
 	)
-
-	mcpServer.AddTool(
-		mcp.NewTool(
-			"get_weather",
-			mcp.WithDescription("获取指定城市的天气信息"),
-			mcp.WithString(
-				"city",
-				mcp.Description("城市名称，如 Beijing、上海"),
-				mcp.Required(),
-			),
-		),
-		func(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-			args := request.GetArguments()
-			city, ok := args["city"].(string)
-			if !ok || city == "" {
-				return nil, fmt.Errorf("invalid city argument")
-			}
-
-			weather, err := weatherClient.GetWeather(ctx, city)
-			if err != nil {
-				return nil, err
-			}
-
-			resultText := fmt.Sprintf(
-				"城市: %s\n温度: %.1f°C\n天气: %s\n湿度: %d%%\n风速: %.1f km/h",
-				weather.Location,
-				weather.Temperature,
-				weather.Condition,
-				weather.Humidity,
-				weather.WindSpeed,
-			)
-
-			return &mcp.CallToolResult{
-				Content: []mcp.Content{
-					mcp.TextContent{
-						Type: "text",
-						Text: resultText,
-					},
-				},
-			}, nil
-		},
-	)
-
-	return mcpServer
+	reg.Register(tool, handleSendEmail)
 }
 
-// StartServer 启动MCP服务器
-// httpAddr: HTTP服务器监听的地址（例如":8080"）
-func StartServer(httpAddr string) error {
-	mcpServer := NewMCPServer()
+func handleSendEmail(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+	args := request.GetArguments()
+	to, _ := args["to"].(string)
+	subject, _ := args["subject"].(string)
+	body, _ := args["body"].(string)
 
-	httpServer := server.NewStreamableHTTPServer(mcpServer)
-	log.Printf("HTTP MCP server listening on %s/mcp", httpAddr)
-	return httpServer.Start(httpAddr)
+	if to == "" || subject == "" {
+		return nil, fmt.Errorf("to and subject are required")
+	}
+
+	// TODO: integrate with common/email when SMTP is configured
+	resultText := fmt.Sprintf("邮件已准备发送\n收件人: %s\n主题: %s\n正文: %s\n(注意: 需要配置 SMTP 后才能实际发送)", to, subject, body)
+	return &mcp.CallToolResult{
+		Content: []mcp.Content{
+			mcp.TextContent{Type: "text", Text: resultText},
+		},
+	}, nil
 }

@@ -2,6 +2,7 @@ package config
 
 import (
 	"log"
+	"sync"
 
 	"github.com/BurntSushi/toml"
 )
@@ -14,7 +15,7 @@ type MainConfig struct {
 
 type EmailConfig struct {
 	Authcode string `toml:"authcode"`
-	Email    string `toml:"email" `
+	Email    string `toml:"email"`
 }
 
 type RedisConfig struct {
@@ -61,15 +62,33 @@ type VoiceServiceConfig struct {
 	VoiceServiceSecretKey string `toml:"voiceServiceSecretKey"`
 }
 
+type MCPConfig struct {
+	Enabled    bool   `toml:"enabled"`
+	ServerAddr string `toml:"serverAddr"`
+	ServerPath string `toml:"serverPath"`
+	AutoStart  bool   `toml:"autoStart"`
+}
+
+type AIModelConfig struct {
+	DefaultModelType string `toml:"defaultModelType"`
+}
+
+type SkillConfig struct {
+	EnabledSkills []string `toml:"enabledSkills"`
+}
+
 type Config struct {
+	MainConfig         `toml:"mainConfig"`
 	EmailConfig        `toml:"emailConfig"`
 	RedisConfig        `toml:"redisConfig"`
 	MysqlConfig        `toml:"mysqlConfig"`
 	JwtConfig          `toml:"jwtConfig"`
-	MainConfig         `toml:"mainConfig"`
 	Rabbitmq           `toml:"rabbitmqConfig"`
 	RagModelConfig     `toml:"ragModelConfig"`
 	VoiceServiceConfig `toml:"voiceServiceConfig"`
+	MCPConfig          `toml:"mcpConfig"`
+	AIModelConfig      `toml:"aiModelConfig"`
+	SkillConfig        `toml:"skillConfig"`
 }
 
 type RedisKeyConfig struct {
@@ -84,22 +103,22 @@ var DefaultRedisKeyConfig = RedisKeyConfig{
 	IndexNamePrefix: "rag_docs:%s:",
 }
 
-var config *Config
-
-// InitConfig 初始化项目配置
-func InitConfig() error {
-	// 设置配置文件路径（相对于 main.go 所在的目录）
-	if _, err := toml.DecodeFile("config/config.toml", config); err != nil {
-		log.Fatal(err.Error())
-		return err
-	}
-	return nil
-}
+var (
+	config     *Config
+	configOnce sync.Once
+)
 
 func GetConfig() *Config {
-	if config == nil {
+	configOnce.Do(func() {
 		config = new(Config)
-		_ = InitConfig()
-	}
+		if _, err := toml.DecodeFile("config/config.toml", config); err != nil {
+			log.Fatalf("failed to load config: %v", err)
+		}
+	})
 	return config
+}
+
+// MCPServerURL returns the full MCP server URL built from config.
+func (c *Config) MCPServerURL() string {
+	return "http://localhost" + c.MCPConfig.ServerAddr + c.MCPConfig.ServerPath
 }

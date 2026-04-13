@@ -2,73 +2,115 @@ package main
 
 import (
 	"GopherAI/common/aihelper"
+	mcpserver "GopherAI/common/mcp/server"
 	"GopherAI/common/mysql"
 	"GopherAI/common/rabbitmq"
 	"GopherAI/common/redis"
+	"GopherAI/common/skill"
 	"GopherAI/config"
 	"GopherAI/dao/message"
+	sessiondao "GopherAI/dao/session"
 	"GopherAI/router"
 	"fmt"
 	"log"
+	"time"
 )
 
 func StartServer(addr string, port int) error {
 	r := router.InitRouter()
-	//服务器静态资源路径映射关系，这里目前不需要
-	// r.Static(config.GetConfig().HttpFilePath, config.GetConfig().MusicFilePath)
 	return r.Run(fmt.Sprintf("%s:%d", addr, port))
 }
 
-// 从数据库加载消息并初始化 AIHelperManager
+// readDataFromDB loads messages from DB and rebuilds AIHelperManager state.
+// It reads each session's ModelType so MCP/RAG sessions are correctly restored.
 func readDataFromDB() error {
 	manager := aihelper.GetGlobalManager()
-	// 从数据库读取所有消息
+
+	sessions, err := sessiondao.GetAllSessions()
+	if err != nil {
+		return fmt.Errorf("failed to load sessions: %v", err)
+	}
+	sessionModelType := make(map[string]string, len(sessions))
+	for _, s := range sessions {
+		mt := s.ModelType
+		if mt == "" {
+			mt = config.GetConfig().AIModelConfig.DefaultModelType
+		}
+		sessionModelType[s.ID] = mt
+	}
+
 	msgs, err := message.GetAllMessages()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to load messages: %v", err)
 	}
-	// 遍历数据库消息
+
 	for i := range msgs {
 		m := &msgs[i]
-		//默认openai模型
-		modelType := "1"
-		config := make(map[string]interface{})
+		modelType := sessionModelType[m.SessionID]
+		if modelType == "" {
+			modelType = config.GetConfig().AIModelConfig.DefaultModelType
+		}
+		cfg := map[string]interface{}{
+			"username": m.UserName,
+		}
 
-		// 创建对应的 AIHelper
-		helper, err := manager.GetOrCreateAIHelper(m.UserName, m.SessionID, modelType, config)
+		helper, err := manager.GetOrCreateAIHelper(m.UserName, m.SessionID, modelType, cfg)
 		if err != nil {
 			log.Printf("[readDataFromDB] failed to create helper for user=%s session=%s: %v", m.UserName, m.SessionID, err)
 			continue
 		}
-		log.Println("readDataFromDB init:  ", helper.SessionID)
-		// 添加消息到内存中(不开启存储功能)
 		helper.AddMessage(m.Content, m.UserName, m.IsUser, false)
 	}
 
-	log.Println("AIHelperManager init success ")
+	log.Println("AIHelperManager init success")
 	return nil
+}
+
+// startMCPServer launches the embedded MCP server in a goroutine if enabled.
+func startMCPServer(conf *config.Config) {
+	if !conf.MCPConfig.Enabled || !conf.MCPConfig.AutoStart {
+		log.Println("MCP server is disabled, skipping")
+		return
+	}
+
+	go func() {
+		addr := conf.MCPConfig.ServerAddr
+		log.Printf("Starting embedded MCP server on %s ...", addr)
+		if err := mcpserver.StartServer(addr); err != nil {
+			log.Printf("MCP server exited with error: %v", err)
+		}
+	}()
+
+	// Give MCP server a moment to bind the port before clients connect.
+	time.Sleep(500 * time.Millisecond)
+	log.Println("MCP server started")
 }
 
 func main() {
 	conf := config.GetConfig()
+
+	if err := mysql.InitMysql(); err != nil {
+		log.Fatalf("InitMysql error: %v", err)
+	}
+
+	startMCPServer(conf)
+
+	skill.RegisterBuiltinSkills(skill.GetGlobalSkillManager())
+	log.Printf("Skills registered: %d", len(skill.GetGlobalSkillManager().ListSkills()))
+
+	if err := readDataFromDB(); err != nil {
+		log.Printf("readDataFromDB warning: %v", err)
+	}
+
+	redis.Init()
+	log.Println("redis init success")
+
+	rabbitmq.InitRabbitMQ()
+	log.Println("rabbitmq init success")
+
 	host := conf.MainConfig.Host
 	port := conf.MainConfig.Port
-	//初始化mysql
-	if err := mysql.InitMysql(); err != nil {
-		log.Println("InitMysql error , " + err.Error())
-		return
-	}
-	//初始化AIHelperManager
-	readDataFromDB()
-
-	//初始化redis
-	redis.Init()
-	log.Println("redis init success  ")
-	rabbitmq.InitRabbitMQ()
-	log.Println("rabbitmq init success  ")
-
-	err := StartServer(host, port) // 启动 HTTP 服务
-	if err != nil {
-		panic(err)
+	if err := StartServer(host, port); err != nil {
+		log.Fatalf("HTTP server error: %v", err)
 	}
 }
