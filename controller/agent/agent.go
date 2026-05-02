@@ -4,6 +4,7 @@ import (
 	"GopherAI/common/code"
 	"GopherAI/controller"
 	agentsvc "GopherAI/service/agent"
+	"encoding/json"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -74,8 +75,10 @@ func StreamExecuteAgent(c *gin.Context) {
 	c.Header("Access-Control-Allow-Origin", "*")
 	c.Header("X-Accel-Buffering", "no")
 
-	// Send sessionId first
-	c.Writer.WriteString(`data: {"type":"session","content":"` + sessionID + `","step":0}` + "\n\n")
+	sessionEvent, _ := json.Marshal(map[string]interface{}{
+		"type": "session", "content": sessionID, "step": 0,
+	})
+	c.Writer.WriteString("data: " + string(sessionEvent) + "\n\n")
 	c.Writer.Flush()
 
 	agentsvc.StreamExecuteTask(userName, sessionID, req.Task, http.ResponseWriter(c.Writer))

@@ -1,6 +1,8 @@
 package aihelper
 
 import (
+	mcpclient "GopherAI/common/mcp/client"
+	mcpconv "GopherAI/common/mcp"
 	"GopherAI/common/rag"
 	"GopherAI/config"
 	"context"
@@ -14,8 +16,6 @@ import (
 	"github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
-	mcpclient "github.com/mark3labs/mcp-go/client"
-	"github.com/mark3labs/mcp-go/client/transport"
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
@@ -205,24 +205,22 @@ func (o *AliRAGModel) Close() error         { return nil }
 const mcpMaxToolRounds = 10
 
 type MCPModel struct {
-	baseLLM   model.ToolCallingChatModel // LLM without tools bound
-	toolLLM   model.ToolCallingChatModel // LLM with MCP tools bound
-	mcpClient *mcpclient.Client
+	baseLLM   model.ToolCallingChatModel
+	toolLLM   model.ToolCallingChatModel
+	client    *mcpclient.MCPClient
 	mcpURL    string
 	username  string
-	tools     []mcp.Tool // cached tool definitions from MCP server
+	tools     []mcp.Tool
 	mu        sync.Mutex
 }
 
 func NewMCPModel(ctx context.Context, username string) (*MCPModel, error) {
 	key := os.Getenv("OPENAI_API_KEY")
 	conf := config.GetConfig()
-	modelName := conf.RagModelConfig.RagChatModelName
-	baseURL := conf.RagModelConfig.RagBaseUrl
 
 	llm, err := openai.NewChatModel(ctx, &openai.ChatModelConfig{
-		BaseURL: baseURL,
-		Model:   modelName,
+		BaseURL: conf.RagModelConfig.RagBaseUrl,
+		Model:   conf.RagModelConfig.RagChatModelName,
 		APIKey:  key,
 	})
 	if err != nil {
@@ -230,44 +228,23 @@ func NewMCPModel(ctx context.Context, username string) (*MCPModel, error) {
 	}
 
 	mcpURL := conf.MCPServerURL()
+	client, err := mcpclient.Dial(ctx, mcpURL, "GopherAI-MCPModel")
+	if err != nil {
+		return nil, fmt.Errorf("mcp client dial failed: %v", err)
+	}
 
 	m := &MCPModel{
 		baseLLM:  llm,
+		client:   client,
 		mcpURL:   mcpURL,
 		username: username,
 	}
 
-	if err := m.initMCPClient(ctx); err != nil {
-		return nil, fmt.Errorf("mcp client init failed: %v", err)
-	}
-
 	if err := m.discoverAndBindTools(ctx); err != nil {
-		log.Printf("MCP tool discovery failed (will retry on first call): %v", err)
+		log.Printf("MCP tool discovery failed (will retry lazily): %v", err)
 	}
 
 	return m, nil
-}
-
-func (m *MCPModel) initMCPClient(ctx context.Context) error {
-	httpTransport, err := transport.NewStreamableHTTP(m.mcpURL)
-	if err != nil {
-		return fmt.Errorf("create mcp transport failed: %v", err)
-	}
-
-	m.mcpClient = mcpclient.NewClient(httpTransport)
-
-	initReq := mcp.InitializeRequest{}
-	initReq.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
-	initReq.Params.ClientInfo = mcp.Implementation{
-		Name:    "GopherAI-MCPClient",
-		Version: "2.0.0",
-	}
-	initReq.Params.Capabilities = mcp.ClientCapabilities{}
-
-	if _, err := m.mcpClient.Initialize(ctx, initReq); err != nil {
-		return fmt.Errorf("mcp initialize failed: %v", err)
-	}
-	return nil
 }
 
 // discoverAndBindTools calls MCP tools/list and binds them to the LLM via WithTools.
@@ -275,13 +252,13 @@ func (m *MCPModel) discoverAndBindTools(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	toolsResult, err := m.mcpClient.ListTools(ctx, mcp.ListToolsRequest{})
+	toolsResult, err := m.client.ListTools(ctx)
 	if err != nil {
 		return fmt.Errorf("mcp list tools failed: %v", err)
 	}
 
 	m.tools = toolsResult.Tools
-	toolInfos := convertMCPToolsToEino(m.tools)
+	toolInfos := mcpconv.ConvertToolsToEino(m.tools)
 
 	toolLLM, err := m.baseLLM.WithTools(toolInfos)
 	if err != nil {
@@ -292,22 +269,32 @@ func (m *MCPModel) discoverAndBindTools(ctx context.Context) error {
 	return nil
 }
 
-func (m *MCPModel) getLLM() model.ToolCallingChatModel {
+// ensureTools lazily retries tool discovery if the initial attempt failed.
+func (m *MCPModel) ensureTools(ctx context.Context) model.ToolCallingChatModel {
+	m.mu.Lock()
+	if m.toolLLM != nil {
+		llm := m.toolLLM
+		m.mu.Unlock()
+		return llm
+	}
+	m.mu.Unlock()
+
+	if err := m.discoverAndBindTools(ctx); err != nil {
+		log.Printf("MCP lazy tool discovery failed: %v", err)
+		return m.baseLLM
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.toolLLM != nil {
-		return m.toolLLM
-	}
-	return m.baseLLM
+	return m.toolLLM
 }
 
-// GenerateResponse runs the tool-calling loop: generate → call tools → feed results → repeat.
 func (m *MCPModel) GenerateResponse(ctx context.Context, messages []*schema.Message) (*schema.Message, error) {
 	if len(messages) == 0 {
 		return nil, fmt.Errorf("no messages provided")
 	}
 
-	llm := m.getLLM()
+	llm := m.ensureTools(ctx)
 	conversation := make([]*schema.Message, len(messages))
 	copy(conversation, messages)
 
@@ -316,30 +303,22 @@ func (m *MCPModel) GenerateResponse(ctx context.Context, messages []*schema.Mess
 		if err != nil {
 			return nil, fmt.Errorf("mcp generate failed (round %d): %v", round, err)
 		}
-
 		if len(resp.ToolCalls) == 0 {
 			return resp, nil
 		}
-
 		conversation = append(conversation, resp)
-
-		toolMsgs, err := m.executeToolCalls(ctx, resp.ToolCalls)
-		if err != nil {
-			return nil, fmt.Errorf("mcp tool execution failed (round %d): %v", round, err)
-		}
+		toolMsgs := m.executeToolCalls(ctx, resp.ToolCalls)
 		conversation = append(conversation, toolMsgs...)
 	}
-
 	return nil, fmt.Errorf("mcp tool calling exceeded max rounds (%d)", mcpMaxToolRounds)
 }
 
-// StreamResponse runs the tool-calling loop with streaming for the final text response.
 func (m *MCPModel) StreamResponse(ctx context.Context, messages []*schema.Message, cb StreamCallback) (string, error) {
 	if len(messages) == 0 {
 		return "", fmt.Errorf("no messages provided")
 	}
 
-	llm := m.getLLM()
+	llm := m.ensureTools(ctx)
 	conversation := make([]*schema.Message, len(messages))
 	copy(conversation, messages)
 
@@ -353,12 +332,10 @@ func (m *MCPModel) StreamResponse(ctx context.Context, messages []*schema.Messag
 		if err != nil {
 			return text, fmt.Errorf("mcp stream recv failed (round %d): %v", round, err)
 		}
-
 		if len(assembled.ToolCalls) == 0 {
 			return text, nil
 		}
 
-		// Tool calls detected — notify frontend, execute, then loop
 		if cb != nil {
 			for _, tc := range assembled.ToolCalls {
 				cb(fmt.Sprintf("\n[调用工具: %s]\n", tc.Function.Name))
@@ -366,140 +343,50 @@ func (m *MCPModel) StreamResponse(ctx context.Context, messages []*schema.Messag
 		}
 
 		conversation = append(conversation, assembled)
-
-		toolMsgs, err := m.executeToolCalls(ctx, assembled.ToolCalls)
-		if err != nil {
-			return "", fmt.Errorf("mcp tool execution failed (round %d): %v", round, err)
-		}
+		toolMsgs := m.executeToolCalls(ctx, assembled.ToolCalls)
 		conversation = append(conversation, toolMsgs...)
 	}
-
 	return "", fmt.Errorf("mcp tool calling exceeded max rounds (%d)", mcpMaxToolRounds)
 }
 
 // executeToolCalls calls each tool on the MCP server and returns Tool-role messages.
-func (m *MCPModel) executeToolCalls(ctx context.Context, toolCalls []schema.ToolCall) ([]*schema.Message, error) {
+// Errors are captured per-tool rather than aborting the whole batch.
+func (m *MCPModel) executeToolCalls(ctx context.Context, toolCalls []schema.ToolCall) []*schema.Message {
 	results := make([]*schema.Message, 0, len(toolCalls))
-
 	for _, tc := range toolCalls {
 		var args map[string]interface{}
 		if tc.Function.Arguments != "" {
 			if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil {
 				results = append(results, &schema.Message{
-					Role:       schema.Tool,
-					ToolCallID: tc.ID,
-					ToolName:   tc.Function.Name,
-					Content:    fmt.Sprintf("failed to parse arguments: %v", err),
+					Role: schema.Tool, ToolCallID: tc.ID, ToolName: tc.Function.Name,
+					Content: fmt.Sprintf("failed to parse arguments: %v", err),
 				})
 				continue
 			}
 		}
 
-		callReq := mcp.CallToolRequest{
-			Params: mcp.CallToolParams{
-				Name:      tc.Function.Name,
-				Arguments: args,
-			},
-		}
-		result, err := m.mcpClient.CallTool(ctx, callReq)
+		result, err := m.client.CallTool(ctx, tc.Function.Name, args)
 		if err != nil {
 			results = append(results, &schema.Message{
-				Role:       schema.Tool,
-				ToolCallID: tc.ID,
-				ToolName:   tc.Function.Name,
-				Content:    fmt.Sprintf("tool call failed: %v", err),
+				Role: schema.Tool, ToolCallID: tc.ID, ToolName: tc.Function.Name,
+				Content: fmt.Sprintf("tool call failed: %v", err),
 			})
 			continue
 		}
 
 		results = append(results, &schema.Message{
-			Role:       schema.Tool,
-			ToolCallID: tc.ID,
-			ToolName:   tc.Function.Name,
-			Content:    extractToolResultText(result),
+			Role: schema.Tool, ToolCallID: tc.ID, ToolName: tc.Function.Name,
+			Content: mcpconv.ExtractToolResultText(result),
 		})
 	}
-	return results, nil
+	return results
 }
 
 func (m *MCPModel) GetModelType() string { return "3" }
 
 func (m *MCPModel) Close() error {
-	if m.mcpClient != nil {
-		m.mcpClient.Close()
+	if m.client != nil {
+		m.client.Close()
 	}
 	return nil
-}
-
-// =================== MCP ↔ Eino conversion helpers ===================
-
-// convertMCPToolsToEino converts MCP tool definitions to Eino ToolInfo for LLM binding.
-func convertMCPToolsToEino(mcpTools []mcp.Tool) []*schema.ToolInfo {
-	infos := make([]*schema.ToolInfo, 0, len(mcpTools))
-	for _, t := range mcpTools {
-		info := &schema.ToolInfo{
-			Name: t.Name,
-			Desc: t.Description,
-		}
-
-		if t.InputSchema.Properties != nil {
-			params := make(map[string]*schema.ParameterInfo)
-			requiredSet := make(map[string]bool)
-			for _, r := range t.InputSchema.Required {
-				requiredSet[r] = true
-			}
-
-			for name, propRaw := range t.InputSchema.Properties {
-				propBytes, err := json.Marshal(propRaw)
-				if err != nil {
-					continue
-				}
-				var prop struct {
-					Type        string `json:"type"`
-					Description string `json:"description"`
-				}
-				if err := json.Unmarshal(propBytes, &prop); err != nil {
-					continue
-				}
-				params[name] = &schema.ParameterInfo{
-					Type:     mapJSONTypeToEino(prop.Type),
-					Desc:     prop.Description,
-					Required: requiredSet[name],
-				}
-			}
-			info.ParamsOneOf = schema.NewParamsOneOfByParams(params)
-		}
-
-		infos = append(infos, info)
-	}
-	return infos
-}
-
-func mapJSONTypeToEino(jsonType string) schema.DataType {
-	switch jsonType {
-	case "string":
-		return schema.String
-	case "integer":
-		return schema.Integer
-	case "number":
-		return schema.Number
-	case "boolean":
-		return schema.Boolean
-	case "array":
-		return schema.Array
-	case "object":
-		return schema.Object
-	default:
-		return schema.String
-	}
-}
-
-func extractToolResultText(result *mcp.CallToolResult) string {
-	var text string
-	for _, content := range result.Content {
-		if textContent, ok := content.(mcp.TextContent); ok {
-			text += textContent.Text + "\n"
-		}
-	}
-	return text
 }

@@ -11,29 +11,39 @@ import (
 
 // MCPClient wraps the mcp-go client with convenience methods.
 type MCPClient struct {
-	c *client.Client
+	c   *client.Client
+	url string
 }
 
-func NewMCPClient(httpURL string) (*MCPClient, error) {
-	httpTransport, err := transport.NewStreamableHTTP(httpURL)
+// Dial creates a new MCPClient connected and initialized to the given MCP server URL.
+// This is the single entry point — callers should NOT duplicate the init handshake.
+func Dial(ctx context.Context, mcpURL string, clientName string) (*MCPClient, error) {
+	httpTransport, err := transport.NewStreamableHTTP(mcpURL)
 	if err != nil {
-		return nil, fmt.Errorf("create HTTP transport failed: %w", err)
+		return nil, fmt.Errorf("create MCP transport failed: %w", err)
 	}
 
 	c := client.NewClient(httpTransport)
-	return &MCPClient{c: c}, nil
-}
 
-func (m *MCPClient) Initialize(ctx context.Context) (*mcp.InitializeResult, error) {
 	initReq := mcp.InitializeRequest{}
 	initReq.Params.ProtocolVersion = mcp.LATEST_PROTOCOL_VERSION
 	initReq.Params.ClientInfo = mcp.Implementation{
-		Name:    "GopherAI-MCPClient",
+		Name:    clientName,
 		Version: "2.0.0",
 	}
 	initReq.Params.Capabilities = mcp.ClientCapabilities{}
 
-	return m.c.Initialize(ctx, initReq)
+	if _, err := c.Initialize(ctx, initReq); err != nil {
+		c.Close()
+		return nil, fmt.Errorf("MCP initialize failed: %w", err)
+	}
+
+	return &MCPClient{c: c, url: mcpURL}, nil
+}
+
+// Raw returns the underlying mcp-go client for advanced usage (e.g. Agent needs it directly).
+func (m *MCPClient) Raw() *client.Client {
+	return m.c
 }
 
 func (m *MCPClient) Ping(ctx context.Context) error {
@@ -52,16 +62,6 @@ func (m *MCPClient) CallTool(ctx context.Context, toolName string, args map[stri
 		},
 	}
 	return m.c.CallTool(ctx, callReq)
-}
-
-func (m *MCPClient) GetToolResultText(result *mcp.CallToolResult) string {
-	var text string
-	for _, content := range result.Content {
-		if textContent, ok := content.(mcp.TextContent); ok {
-			text += textContent.Text + "\n"
-		}
-	}
-	return text
 }
 
 func (m *MCPClient) Close() {
