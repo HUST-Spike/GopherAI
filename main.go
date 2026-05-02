@@ -14,6 +14,8 @@ import (
 	"fmt"
 	"log"
 	"time"
+
+	"github.com/joho/godotenv"
 )
 
 func StartServer(addr string, port int) error {
@@ -87,6 +89,10 @@ func startMCPServer(conf *config.Config) {
 }
 
 func main() {
+	if err := godotenv.Load("config/.env"); err != nil {
+		log.Printf("config/.env not loaded: %v", err)
+	}
+
 	conf := config.GetConfig()
 
 	if err := mysql.InitMysql(); err != nil {

@@ -1,5 +1,7 @@
-# ---------- 项目配置（含敏感信息） ----------
-config/config.toml
+﻿# ---------- 项目配置（含敏感信息） ----------
+config/config.toml
+config/.env
+deploy/.env
 
 # ---------- 文档目录 ----------
 doc/
@@ -38,3 +40,4 @@ pnpm-debug.log*
 .DS_Store
 Thumbs.db
 Desktop.ini
+
