@@ -1,0 +1,44 @@
+﻿services:
+  mysql:
+    image: mysql:8.0
+    container_name: gopherai-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: "123456"
+      MYSQL_DATABASE: "GopherAI"
+    ports:
+      - "3306:3306"
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+    volumes:
+      - gopherai-mysql-data:/var/lib/mysql
+
+  redis:
+    image: redis:7
+    container_name: gopherai-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - gopherai-redis-data:/data
+    command: redis-server --appendonly yes
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: gopherai-rabbitmq
+    restart: unless-stopped
+    environment:
+      RABBITMQ_DEFAULT_USER: "root"
+      RABBITMQ_DEFAULT_PASS: "123456"
+      RABBITMQ_DEFAULT_VHOST: "/"
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - gopherai-rabbitmq-data:/var/lib/rabbitmq
+
+volumes:
+  gopherai-mysql-data:
+  gopherai-redis-data:
+  gopherai-rabbitmq-data:
