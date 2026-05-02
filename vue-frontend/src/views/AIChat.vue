@@ -25,9 +25,9 @@
         <button class="sync-btn" @click="syncHistory" :disabled="!currentSessionId || tempSession">同步历史数据</button>
         <label for="modelType">选择模型：</label>
         <select id="modelType" v-model="selectedModel" class="model-select">
-          <option value="1">阿里百炼</option>
-          <option value="2">阿里百炼 RAG</option>
-          <option value="3">阿里百炼 MCP</option>
+          <option value="1">DeepSeek V4 Pro</option>
+          <option value="2">RAG（旧流程，待迁移）</option>
+          <option value="3">DeepSeek MCP</option>
         </select>
         <label for="streamingMode" style="margin-left: 20px;">
           <input type="checkbox" id="streamingMode" v-model="isStreaming" />
@@ -266,6 +266,12 @@ export default {
         ElMessage.warning('请输入消息内容')
         return
       }
+      if (!currentSessionId.value) {
+        currentSessionId.value = 'temp'
+        tempSession.value = true
+        currentMessages.value = []
+      }
+
 
       const userMessage = {
         role: 'user',
