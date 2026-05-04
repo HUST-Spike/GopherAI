@@ -3,9 +3,15 @@ config/config.toml
 
 config/.env
 deploy/.env
+.env
+.env.local
+workers/**/.env
 
 # ---------- 文档目录 ----------
 doc/
+logs/
+uploads/
+tmp-rag-test.md
 
 # ---------- Go ----------
 *.exe
@@ -16,6 +22,14 @@ doc/
 *.test
 *.out
 vendor/
+
+# ---------- Python ----------
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
 
 # ---------- Vue / Node ----------
 vue-frontend/node_modules/
