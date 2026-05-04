@@ -4,6 +4,7 @@ import (
 	"GopherAI/common/rabbitmq"
 	"GopherAI/config"
 	documentdao "GopherAI/dao/document"
+	sessiondao "GopherAI/dao/session"
 	"GopherAI/model"
 	"GopherAI/utils"
 	"crypto/sha256"
@@ -20,6 +21,7 @@ import (
 
 type UploadRagFileResult struct {
 	DocumentID string
+	SessionID  string
 	FilePath   string
 	Status     string
 }
@@ -34,6 +36,12 @@ func UploadRagFile(username string, file *multipart.FileHeader, sessionID string
 	conf := config.GetConfig()
 	if maxSize := conf.DocumentMaxFileSizeBytes(); file.Size > maxSize {
 		return nil, errors.New("uploaded file exceeds configured max size")
+	}
+
+	resolvedSessionID, err := ensureUploadSession(username, sessionID, file.Filename, conf)
+	if err != nil {
+		log.Printf("Failed to ensure upload session trace_id=%s username=%s filename=%s error=%v", traceID, username, file.Filename, err)
+		return nil, err
 	}
 
 	userDir := filepath.Join(conf.DocumentUploadDir(), username)
@@ -78,7 +86,7 @@ func UploadRagFile(username string, file *multipart.FileHeader, sessionID string
 	doc := &model.Document{
 		ID:               documentID,
 		UserName:         username,
-		SessionID:        sessionID,
+		SessionID:        resolvedSessionID,
 		OriginalFilename: file.Filename,
 		StoredFilename:   storedFilename,
 		FilePath:         storageKey,
@@ -105,7 +113,7 @@ func UploadRagFile(username string, file *multipart.FileHeader, sessionID string
 		DocumentID:       documentID,
 		JobID:            jobID,
 		UserName:         username,
-		SessionID:        sessionID,
+		SessionID:        resolvedSessionID,
 		FilePath:         storageKey,
 		OriginalFilename: file.Filename,
 		MimeType:         mimeType,
@@ -147,9 +155,32 @@ func UploadRagFile(username string, file *multipart.FileHeader, sessionID string
 	log.Printf("Document queued successfully trace_id=%s document_id=%s path=%s", traceID, documentID, storageKey)
 	return &UploadRagFileResult{
 		DocumentID: documentID,
+		SessionID:  resolvedSessionID,
 		FilePath:   storageKey,
 		Status:     model.DocumentStatusQueued,
 	}, nil
+}
+
+func ensureUploadSession(username string, sessionID string, originalFilename string, conf *config.Config) (string, error) {
+	if strings.TrimSpace(sessionID) != "" {
+		return sessionID, nil
+	}
+
+	modelType := conf.AIModelConfig.DefaultModelType
+	if modelType == "" {
+		modelType = "1"
+	}
+
+	newSession := &model.Session{
+		ID:        utils.GenerateUUID(),
+		UserName:  username,
+		Title:     "Document: " + originalFilename,
+		ModelType: modelType,
+	}
+	if _, err := sessiondao.CreateSession(newSession); err != nil {
+		return "", err
+	}
+	return newSession.ID, nil
 }
 
 func publishDocumentUploadedWithRetry(event rabbitmq.DocumentUploadedEvent) error {

@@ -51,18 +51,24 @@ type Document struct {
 }
 
 type DocumentIndexJob struct {
-	ID           string     `gorm:"primaryKey;type:varchar(36)" json:"id"`
-	DocumentID   string     `gorm:"index;not null;type:varchar(36)" json:"document_id"`
-	EventID      string     `gorm:"uniqueIndex;type:varchar(36);not null" json:"event_id"`
-	TraceID      string     `gorm:"index;type:varchar(36)" json:"trace_id,omitempty"`
-	UserName     string     `gorm:"index;type:varchar(50)" json:"username"`
-	QueueName    string     `gorm:"type:varchar(100)" json:"queue_name"`
-	Status       string     `gorm:"index;type:varchar(30);not null" json:"status"`
-	Attempt      int        `gorm:"default:1" json:"attempt"`
-	WorkerID     string     `gorm:"type:varchar(100)" json:"worker_id,omitempty"`
-	StartedAt    *time.Time `json:"started_at,omitempty"`
-	FinishedAt   *time.Time `json:"finished_at,omitempty"`
-	ErrorMessage string     `gorm:"type:text" json:"error_message,omitempty"`
-	CreatedAt    time.Time  `json:"created_at"`
-	UpdatedAt    time.Time  `json:"updated_at"`
+	ID                 string     `gorm:"primaryKey;type:varchar(36)" json:"id"`
+	DocumentID         string     `gorm:"index;not null;type:varchar(36)" json:"document_id"`
+	EventID            string     `gorm:"uniqueIndex;type:varchar(36);not null" json:"event_id"`
+	TraceID            string     `gorm:"index;type:varchar(36)" json:"trace_id,omitempty"`
+	UserName           string     `gorm:"index;type:varchar(50)" json:"username"`
+	QueueName          string     `gorm:"type:varchar(100)" json:"queue_name"`
+	Status             string     `gorm:"index;type:varchar(30);not null" json:"status"`
+	Attempt            int        `gorm:"default:1" json:"attempt"`
+	WorkerID           string     `gorm:"type:varchar(100)" json:"worker_id,omitempty"`
+	ChunkCount         int        `gorm:"default:0" json:"chunk_count"`
+	MilvusCollection   string     `gorm:"type:varchar(100)" json:"milvus_collection,omitempty"`
+	EmbeddingModel     string     `gorm:"type:varchar(100)" json:"embedding_model,omitempty"`
+	EmbeddingDimension int        `gorm:"default:0" json:"embedding_dimension"`
+	DurationMs         int64      `gorm:"default:0" json:"duration_ms"`
+	ProcessAttempts    int        `gorm:"default:1" json:"process_attempts"`
+	StartedAt          *time.Time `json:"started_at,omitempty"`
+	FinishedAt         *time.Time `json:"finished_at,omitempty"`
+	ErrorMessage       string     `gorm:"type:text" json:"error_message,omitempty"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
 }

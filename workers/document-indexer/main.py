@@ -1,5 +1,7 @@
 from config import load_config
+from indexer import RealDocumentIndexer
 from logging_setup import setup_logging
+from milvus_store import MilvusDocumentChunkStore
 from mq import DocumentMQ
 from processor import DocumentProcessor
 from repository import DocumentRepository
@@ -18,9 +20,14 @@ def main() -> None:
         config.mock_index,
     )
 
-    repo = DocumentRepository(config.mysql_dsn)
+    repo = DocumentRepository(config.mysql_dsn, config.mysql_session_time_zone)
     mq = DocumentMQ(config)
-    processor = DocumentProcessor(repo, mq, config, logger)
+    real_indexer = None
+    if not config.mock_index:
+        store = MilvusDocumentChunkStore(config, logger)
+        real_indexer = RealDocumentIndexer(config, store, logger)
+
+    processor = DocumentProcessor(repo, mq, config, logger, real_indexer=real_indexer)
 
     logger.info("worker_consuming worker_id=%s queue=%s", config.worker_id, config.queue)
     mq.consume(processor.handle)

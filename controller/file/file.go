@@ -16,6 +16,7 @@ type (
 	UploadFileResponse struct {
 		FilePath   string `json:"file_path,omitempty"`
 		DocumentID string `json:"document_id,omitempty"`
+		SessionID  string `json:"session_id,omitempty"`
 		Status     string `json:"status,omitempty"`
 		controller.Response
 	}
@@ -68,6 +69,7 @@ func UploadRagFile(c *gin.Context) {
 	res.Success()
 	res.FilePath = result.FilePath
 	res.DocumentID = result.DocumentID
+	res.SessionID = result.SessionID
 	res.Status = result.Status
 	c.JSON(http.StatusOK, res)
 }
