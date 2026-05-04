@@ -12,6 +12,7 @@ doc/
 logs/
 uploads/
 tmp-rag-test.md
+test/
 
 # ---------- Go ----------
 *.exe

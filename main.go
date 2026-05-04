@@ -2,6 +2,7 @@ package main
 
 import (
 	"GopherAI/common/aihelper"
+	"GopherAI/common/logging"
 	mcpserver "GopherAI/common/mcp/server"
 	"GopherAI/common/mysql"
 	"GopherAI/common/rabbitmq"
@@ -89,6 +90,10 @@ func startMCPServer(conf *config.Config) {
 }
 
 func main() {
+	if err := logging.InitGoLogger(); err != nil {
+		log.Printf("InitGoLogger warning: %v", err)
+	}
+
 	if err := godotenv.Load("config/.env"); err != nil {
 		log.Printf("config/.env not loaded: %v", err)
 	}

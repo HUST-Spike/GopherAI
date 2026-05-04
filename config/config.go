@@ -57,6 +57,18 @@ type RagModelConfig struct {
 	RagDimension      int    `toml:"dimension"`
 }
 
+type DocumentConfig struct {
+	UploadDir     string   `toml:"uploadDir"`
+	MaxFileSizeMB int      `toml:"maxFileSizeMB"`
+	AllowedExts   []string `toml:"allowedExts"`
+}
+
+type DocumentIndexConfig struct {
+	Exchange   string `toml:"exchange"`
+	Queue      string `toml:"queue"`
+	RoutingKey string `toml:"routingKey"`
+}
+
 type VoiceServiceConfig struct {
 	VoiceServiceApiKey    string `toml:"voiceServiceApiKey"`
 	VoiceServiceSecretKey string `toml:"voiceServiceSecretKey"`
@@ -78,17 +90,19 @@ type SkillConfig struct {
 }
 
 type Config struct {
-	MainConfig         `toml:"mainConfig"`
-	EmailConfig        `toml:"emailConfig"`
-	RedisConfig        `toml:"redisConfig"`
-	MysqlConfig        `toml:"mysqlConfig"`
-	JwtConfig          `toml:"jwtConfig"`
-	Rabbitmq           `toml:"rabbitmqConfig"`
-	RagModelConfig     `toml:"ragModelConfig"`
-	VoiceServiceConfig `toml:"voiceServiceConfig"`
-	MCPConfig          `toml:"mcpConfig"`
-	AIModelConfig      `toml:"aiModelConfig"`
-	SkillConfig        `toml:"skillConfig"`
+	MainConfig          `toml:"mainConfig"`
+	EmailConfig         `toml:"emailConfig"`
+	RedisConfig         `toml:"redisConfig"`
+	MysqlConfig         `toml:"mysqlConfig"`
+	JwtConfig           `toml:"jwtConfig"`
+	Rabbitmq            `toml:"rabbitmqConfig"`
+	RagModelConfig      `toml:"ragModelConfig"`
+	DocumentConfig      `toml:"documentConfig"`
+	DocumentIndexConfig `toml:"documentIndexConfig"`
+	VoiceServiceConfig  `toml:"voiceServiceConfig"`
+	MCPConfig           `toml:"mcpConfig"`
+	AIModelConfig       `toml:"aiModelConfig"`
+	SkillConfig         `toml:"skillConfig"`
 }
 
 type RedisKeyConfig struct {
@@ -121,4 +135,39 @@ func GetConfig() *Config {
 // MCPServerURL returns the full MCP server URL built from config.
 func (c *Config) MCPServerURL() string {
 	return "http://localhost" + c.MCPConfig.ServerAddr + c.MCPConfig.ServerPath
+}
+
+func (c *Config) DocumentUploadDir() string {
+	if c.DocumentConfig.UploadDir == "" {
+		return "uploads"
+	}
+	return c.DocumentConfig.UploadDir
+}
+
+func (c *Config) DocumentMaxFileSizeBytes() int64 {
+	if c.DocumentConfig.MaxFileSizeMB <= 0 {
+		return 20 * 1024 * 1024
+	}
+	return int64(c.DocumentConfig.MaxFileSizeMB) * 1024 * 1024
+}
+
+func (c *Config) DocumentIndexExchange() string {
+	if c.DocumentIndexConfig.Exchange == "" {
+		return "gopherai.document"
+	}
+	return c.DocumentIndexConfig.Exchange
+}
+
+func (c *Config) DocumentIndexQueue() string {
+	if c.DocumentIndexConfig.Queue == "" {
+		return "gopherai.document.index"
+	}
+	return c.DocumentIndexConfig.Queue
+}
+
+func (c *Config) DocumentIndexRoutingKey() string {
+	if c.DocumentIndexConfig.RoutingKey == "" {
+		return "document.uploaded"
+	}
+	return c.DocumentIndexConfig.RoutingKey
 }

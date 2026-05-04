@@ -32,5 +32,11 @@ func InitRouter() *gin.Engine {
 		FileRouter(FileGroup)
 	}
 
+	{
+		DocumentGroup := enterRouter.Group("/documents")
+		DocumentGroup.Use(jwt.Auth())
+		DocumentRouter(DocumentGroup)
+	}
+
 	return r
 }
