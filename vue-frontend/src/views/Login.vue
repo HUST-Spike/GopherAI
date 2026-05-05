@@ -10,7 +10,8 @@
         ref="loginFormRef"
         :model="loginForm"
         :rules="loginRules"
-        label-width="80px"
+        label-position="top"
+        class="login-form"
       >
         <el-form-item label="用户名" prop="username">
           <el-input
@@ -31,7 +32,7 @@
             type="primary"
             :loading="loading"
             @click="handleLogin"
-            style="width: 100%"
+            class="login-submit"
           >
             登录
           </el-button>
@@ -40,7 +41,7 @@
           <el-button
             type="text"
             @click="$router.push('/register')"
-            style="width: 100%"
+            class="register-link"
           >
             还没有账号？去注册
           </el-button>
@@ -182,6 +183,11 @@ export default {
   to { filter: brightness(1.2); }
 }
 
+.login-form {
+  width: min(100%, 320px);
+  margin: 0 auto;
+}
+
 .el-form-item {
   margin-bottom: 24px;
 }
@@ -221,6 +227,11 @@ export default {
 .el-button:hover {
   transform: translateY(-2px);
   box-shadow: 0 8px 25px rgba(64, 158, 255, 0.3);
+}
+
+.login-submit,
+.register-link {
+  width: 100%;
 }
 
 .login-link {

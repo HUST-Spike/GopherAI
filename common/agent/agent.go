@@ -3,6 +3,9 @@ package agent
 import (
 	mcpconv "GopherAI/common/mcp"
 	mcpclient "GopherAI/common/mcp/client"
+	mcprunner "GopherAI/common/mcp/runner"
+	mcpserver "GopherAI/common/mcp/server"
+	"GopherAI/common/skill"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -95,14 +98,17 @@ func (a *Agent) StreamExecute(ctx context.Context, task string, cb StreamCallbac
 }
 
 func (a *Agent) executeWithCallback(ctx context.Context, task string, cb StreamCallback) (*AgentResult, error) {
-	conversation := a.buildInitialMessages(task)
+	visibleTools := a.visibleToolsForSession()
+
+	conversation := a.buildInitialMessages(task, visibleTools)
 	var steps []StepResult
 
-	toolInfos := mcpconv.ConvertToolsToEino(a.Tools)
+	toolInfos := mcpconv.ConvertToolsToEino(visibleTools)
 	llmWithTools, err := a.LLM.WithTools(toolInfos)
 	if err != nil {
 		return nil, fmt.Errorf("agent bind tools failed: %v", err)
 	}
+	log.Printf("agent: bound %d/%d tools (session=%s)", len(visibleTools), len(a.Tools), a.SessionID)
 
 	for step := 1; step <= a.MaxSteps; step++ {
 		resp, err := llmWithTools.Generate(ctx, conversation)
@@ -155,8 +161,8 @@ func (a *Agent) executeWithCallback(ctx context.Context, task string, cb StreamC
 	return nil, fmt.Errorf("agent exceeded max steps (%d)", a.MaxSteps)
 }
 
-func (a *Agent) buildInitialMessages(task string) []*schema.Message {
-	systemPrompt := a.buildSystemPrompt()
+func (a *Agent) buildInitialMessages(task string, visibleTools []mcp.Tool) []*schema.Message {
+	systemPrompt := a.buildSystemPrompt(visibleTools)
 	messages := []*schema.Message{
 		{Role: schema.System, Content: systemPrompt},
 	}
@@ -167,7 +173,7 @@ func (a *Agent) buildInitialMessages(task string) []*schema.Message {
 	return messages
 }
 
-func (a *Agent) buildSystemPrompt() string {
+func (a *Agent) buildSystemPrompt(visibleTools []mcp.Tool) string {
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("你是 %s，一个智能代理（Agent）。\n", a.Name))
 	if a.Description != "" {
@@ -186,13 +192,22 @@ func (a *Agent) buildSystemPrompt() string {
 - 工具结果会返回给你，据此决定下一步
 - 如果无需工具即可回答，直接回答即可
 `)
-	if len(a.Tools) > 0 {
+	if len(visibleTools) > 0 {
 		sb.WriteString("\n可用工具:\n")
-		for _, t := range a.Tools {
+		for _, t := range visibleTools {
 			sb.WriteString(fmt.Sprintf("- %s: %s\n", t.Name, t.Description))
 		}
 	}
 	return sb.String()
+}
+
+// visibleToolsForSession filters a.Tools through the global tool registry
+// using the session's active skills. Tools whose registry entry marks them
+// SkillRestricted only show up when at least one of their AllowedSkills is
+// active. This is what gives the demo's skill toggles real teeth.
+func (a *Agent) visibleToolsForSession() []mcp.Tool {
+	activeSkills := skill.GetGlobalSkillManager().GetActiveSkillNames(a.SessionID)
+	return mcpserver.DefaultRegistry.VisibleTools(a.Tools, activeSkills)
 }
 
 func (a *Agent) callTool(ctx context.Context, tc schema.ToolCall) (string, error) {
@@ -203,14 +218,36 @@ func (a *Agent) callTool(ctx context.Context, tc schema.ToolCall) (string, error
 		}
 	}
 
+	traceID, _ := ctx.Value(agentTraceIDKey{}).(string)
+
 	callCtx := mcpconv.WithToolCtx(ctx, mcpconv.ToolCtx{
 		UserName:  a.UserName,
 		SessionID: a.SessionID,
+		TraceID:   traceID,
 	})
 
-	result, err := a.MCPClient.CallTool(callCtx, tc.Function.Name, args)
-	if err != nil {
-		return "", err
+	activeSkills := skill.GetGlobalSkillManager().GetActiveSkillNames(a.SessionID)
+
+	res := mcprunner.Run(callCtx, a.MCPClient, tc.Function.Name, args, mcprunner.Options{
+		ToolCallID:   tc.ID,
+		TraceID:      traceID,
+		ActiveSkills: activeSkills,
+		ModelType:    "agent",
+	})
+
+	// We always hand the LLM something — Run.Text already contains a
+	// human-readable failure message when status != success — so the agent
+	// loop can decide to keep going or wrap up rather than aborting.
+	return res.Text, nil
+}
+
+type agentTraceIDKey struct{}
+
+// WithTraceID stamps a trace_id onto ctx so the agent's tool calls land
+// under the same trace as the originating HTTP request.
+func WithTraceID(ctx context.Context, traceID string) context.Context {
+	if traceID == "" {
+		return ctx
 	}
-	return mcpconv.ExtractToolResultText(result), nil
+	return context.WithValue(ctx, agentTraceIDKey{}, traceID)
 }

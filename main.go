@@ -4,6 +4,7 @@ import (
 	"GopherAI/common/aihelper"
 	"GopherAI/common/logging"
 	mcpserver "GopherAI/common/mcp/server"
+	"GopherAI/common/mcp/server/tools"
 	"GopherAI/common/mysql"
 	"GopherAI/common/rabbitmq"
 	"GopherAI/common/redis"
@@ -71,11 +72,18 @@ func readDataFromDB() error {
 }
 
 // startMCPServer launches the embedded MCP server in a goroutine if enabled.
+//
+// Tool registration must happen here, BEFORE the MCP server starts listening,
+// otherwise clients connecting during the brief boot window would see an
+// empty tools/list response.
 func startMCPServer(conf *config.Config) {
 	if !conf.MCPConfig.Enabled || !conf.MCPConfig.AutoStart {
 		log.Println("MCP server is disabled, skipping")
 		return
 	}
+
+	tools.RegisterAll(mcpserver.DefaultRegistry)
+	log.Printf("MCP tools registered: %d", mcpserver.DefaultRegistry.Count())
 
 	go func() {
 		addr := conf.MCPConfig.ServerAddr

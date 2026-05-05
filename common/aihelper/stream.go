@@ -26,7 +26,7 @@ func drainStream(stream *schema.StreamReader[*schema.Message], cb StreamCallback
 		if len(chunk.Content) > 0 {
 			fullText.WriteString(chunk.Content)
 			if cb != nil {
-				cb(chunk.Content)
+				cb(TokenEvent(chunk.Content))
 			}
 		}
 		if len(chunk.ToolCalls) > 0 {

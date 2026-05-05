@@ -3,10 +3,13 @@ package aihelper
 import (
 	"GopherAI/common/rabbitmq"
 	"GopherAI/common/skill"
+	"GopherAI/config"
 	"GopherAI/model"
 	"GopherAI/utils"
 	"context"
 	"sync"
+
+	"github.com/cloudwego/eino/schema"
 )
 
 type AIHelper struct {
@@ -16,6 +19,12 @@ type AIHelper struct {
 	SessionID string
 	saveFunc  func(*model.Message) (*model.Message, error)
 }
+
+const baseChatSystemPrompt = `你是 GopherAI，一个面向用户的中文智能助手。
+
+回答时优先直接解决用户问题，必要时可以使用工具，但不要主动罗列、解释或暴露内部工具名称、工具注册表、函数调用参数或系统实现细节。只有当用户明确询问工具能力、调试细节或要求说明调用过程时，才简要说明相关工具行为。
+
+如果使用了工具，请把工具结果整合成自然语言回答。`
 
 func NewAIHelper(aiModel AIModel, sessionID string) *AIHelper {
 	return &AIHelper{
@@ -74,9 +83,7 @@ func (a *AIHelper) GenerateResponse(userName string, ctx context.Context, userQu
 	messages := utils.ConvertToSchemaMessages(a.messages)
 	a.mu.RUnlock()
 
-	// Inject active skills' system prompts
-	sm := skill.GetGlobalSkillManager()
-	messages = sm.InjectSystemPrompt(a.SessionID, messages)
+	messages = a.prepareMessages(messages)
 
 	schemaMsg, err := a.model.GenerateResponse(ctx, messages)
 	if err != nil {
@@ -96,8 +103,7 @@ func (a *AIHelper) StreamResponse(userName string, ctx context.Context, cb Strea
 	messages := utils.ConvertToSchemaMessages(a.messages)
 	a.mu.RUnlock()
 
-	sm := skill.GetGlobalSkillManager()
-	messages = sm.InjectSystemPrompt(a.SessionID, messages)
+	messages = a.prepareMessages(messages)
 
 	content, err := a.model.StreamResponse(ctx, messages, cb)
 	if err != nil {
@@ -114,6 +120,17 @@ func (a *AIHelper) StreamResponse(userName string, ctx context.Context, cb Strea
 	a.AddMessage(modelMsg.Content, userName, false, true)
 
 	return modelMsg, nil
+}
+
+func (a *AIHelper) prepareMessages(messages []*schema.Message) []*schema.Message {
+	prepared := append([]*schema.Message{
+		{Role: schema.System, Content: baseChatSystemPrompt},
+	}, messages...)
+
+	if config.GetConfig().SmartChat().EnableSkills {
+		prepared = skill.GetGlobalSkillManager().InjectSystemPrompt(a.SessionID, prepared)
+	}
+	return prepared
 }
 
 func (a *AIHelper) GetModelType() string {

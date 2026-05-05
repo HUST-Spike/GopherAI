@@ -5,7 +5,6 @@ import (
 	"GopherAI/controller"
 	"GopherAI/model"
 	"GopherAI/service/session"
-	"fmt"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -17,8 +16,12 @@ type (
 		Sessions []model.SessionInfo `json:"sessions,omitempty"`
 	}
 	CreateSessionAndSendMessageRequest struct {
-		UserQuestion string `json:"question" binding:"required"`  // 用户问题;
-		ModelType    string `json:"modelType" binding:"required"` // 模型类型;
+		UserQuestion string `json:"question" binding:"required"` // 用户问题
+		// ModelType is optional. The frontend's "all-in-one" chat omits it and
+		// the server falls back to aiModelConfig.defaultModelType (=5/SmartModel).
+		// Legacy clients that still pass "1"/"2"/"3"/"4" continue to work
+		// unchanged so smoke tests against earlier behavior are not broken.
+		ModelType string `json:"modelType"`
 	}
 
 	CreateSessionAndSendMessageResponse struct {
@@ -28,8 +31,8 @@ type (
 	}
 
 	ChatSendRequest struct {
-		UserQuestion string `json:"question" binding:"required"`            // 用户问题;
-		ModelType    string `json:"modelType" binding:"required"`           // 模型类型;
+		UserQuestion string `json:"question" binding:"required"`            // 用户问题
+		ModelType    string `json:"modelType"`                              // 可选；缺省时使用 aiModelConfig.defaultModelType
 		SessionID    string `json:"sessionId,omitempty" binding:"required"` // 当前会话ID
 	}
 
@@ -99,20 +102,15 @@ func CreateStreamSessionAndSendMessage(c *gin.Context) {
 	c.Header("Access-Control-Allow-Origin", "*")
 	c.Header("X-Accel-Buffering", "no") // 禁止代理缓存
 
-	// 先创建会话并立即把 sessionId 下发给前端，随后再开始流式输出
+	// 先创建会话；session 事件由 service 层在流的第一帧统一发出，那里同时
+	// 携带 trace_id，避免前端拿到两份不同 schema 的开场事件。
 	sessionID, code_ := session.CreateStreamSessionOnly(userName, req.UserQuestion, req.ModelType)
 	if code_ != code.CodeSuccess {
 		c.SSEvent("error", gin.H{"message": "Failed to create session"})
 		return
 	}
 
-	// 先把 sessionId 通过 data 事件发送给前端，前端据此绑定当前会话，侧边栏即可出现新标签
-	c.Writer.WriteString(fmt.Sprintf("data: {\"sessionId\": \"%s\"}\n\n", sessionID))
-	c.Writer.Flush()
-
-	// 然后开始把本次回答进行流式发送（包含最后的 [DONE]）
-	code_ = session.StreamMessageToExistingSession(userName, sessionID, req.UserQuestion, req.ModelType, http.ResponseWriter(c.Writer))
-	if code_ != code.CodeSuccess {
+	if code_ = session.StreamMessageToExistingSession(userName, sessionID, req.UserQuestion, req.ModelType, http.ResponseWriter(c.Writer)); code_ != code.CodeSuccess {
 		c.SSEvent("error", gin.H{"message": "Failed to send message"})
 		return
 	}

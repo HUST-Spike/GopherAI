@@ -31,6 +31,18 @@ func ListDocumentsByUserName(userName string) ([]model.Document, error) {
 	return docs, err
 }
 
+// ListDocumentsByUserAndSession returns documents owned by the user in the
+// given session. Used by the list_my_documents tool which is always scoped
+// to the current chat session for privacy.
+func ListDocumentsByUserAndSession(userName string, sessionID string) ([]model.Document, error) {
+	var docs []model.Document
+	err := mysql.DB.
+		Where("user_name = ? AND session_id = ?", userName, sessionID).
+		Order("created_at desc").
+		Find(&docs).Error
+	return docs, err
+}
+
 func MarkDocumentQueued(id string, traceID string, queuedAt time.Time) error {
 	return mysql.DB.Model(&model.Document{}).
 		Where("id = ?", id).

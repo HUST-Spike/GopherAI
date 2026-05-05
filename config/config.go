@@ -2,6 +2,8 @@ package config
 
 import (
 	"log"
+	"os"
+	"strconv"
 	"sync"
 
 	"github.com/BurntSushi/toml"
@@ -89,6 +91,21 @@ type SkillConfig struct {
 	EnabledSkills []string `toml:"enabledSkills"`
 }
 
+// SmartChatConfig governs the unified "all-in-one" chat (modelType=5).
+// Each switch is a feature toggle that can be flipped at runtime via env
+// vars (ENABLE_TOOLS / ENABLE_SKILLS / ENABLE_AGENT_LOOP) for testing in
+// isolation. All values are intentionally optional so an empty toml block
+// still yields a usable default (everything on, ten-second tool calls,
+// three retries, ten reasoning rounds).
+type SmartChatConfig struct {
+	EnableTools        *bool `toml:"enableTools"`
+	EnableSkills       *bool `toml:"enableSkills"`
+	EnableAgentLoop    *bool `toml:"enableAgentLoop"`
+	ToolCallTimeoutMs  int   `toml:"toolCallTimeoutMs"`
+	ToolCallMaxRetries int   `toml:"toolCallMaxRetries"`
+	ToolCallMaxRounds  int   `toml:"toolCallMaxRounds"`
+}
+
 type Config struct {
 	MainConfig          `toml:"mainConfig"`
 	EmailConfig         `toml:"emailConfig"`
@@ -103,6 +120,7 @@ type Config struct {
 	MCPConfig           `toml:"mcpConfig"`
 	AIModelConfig       `toml:"aiModelConfig"`
 	SkillConfig         `toml:"skillConfig"`
+	SmartChatConfig     `toml:"smartChatConfig"`
 }
 
 type RedisKeyConfig struct {
@@ -166,4 +184,70 @@ func (c *Config) DocumentIndexRoutingKey() string {
 		return "document.uploaded"
 	}
 	return c.DocumentIndexConfig.RoutingKey
+}
+
+// SmartChat returns SmartChatConfig with env-var overrides applied. The
+// pointer-typed switches let us tell apart "explicit false" from "left at
+// default" in toml; env vars further override toml so demo-time toggles
+// work without restarting nothing more than the process.
+func (c *Config) SmartChat() SmartChatRuntime {
+	enable := func(field *bool, envKey string, def bool) bool {
+		if v, ok := envBool(envKey); ok {
+			return v
+		}
+		if field != nil {
+			return *field
+		}
+		return def
+	}
+	maxRounds := c.SmartChatConfig.ToolCallMaxRounds
+	if v, ok := envInt("TOOL_CALL_MAX_ROUNDS"); ok {
+		maxRounds = v
+	}
+	if maxRounds <= 0 {
+		maxRounds = 10
+	}
+	return SmartChatRuntime{
+		EnableTools:        enable(c.SmartChatConfig.EnableTools, "ENABLE_TOOLS", true),
+		EnableSkills:       enable(c.SmartChatConfig.EnableSkills, "ENABLE_SKILLS", true),
+		EnableAgentLoop:    enable(c.SmartChatConfig.EnableAgentLoop, "ENABLE_AGENT_LOOP", true),
+		ToolCallTimeoutMs:  c.SmartChatConfig.ToolCallTimeoutMs,
+		ToolCallMaxRetries: c.SmartChatConfig.ToolCallMaxRetries,
+		ToolCallMaxRounds:  maxRounds,
+	}
+}
+
+// SmartChatRuntime is the materialized config (no nil pointers, env vars
+// already applied) consumed by SmartModel.
+type SmartChatRuntime struct {
+	EnableTools        bool
+	EnableSkills       bool
+	EnableAgentLoop    bool
+	ToolCallTimeoutMs  int
+	ToolCallMaxRetries int
+	ToolCallMaxRounds  int
+}
+
+func envBool(key string) (bool, bool) {
+	raw, ok := os.LookupEnv(key)
+	if !ok || raw == "" {
+		return false, false
+	}
+	v, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, false
+	}
+	return v, true
+}
+
+func envInt(key string) (int, bool) {
+	raw, ok := os.LookupEnv(key)
+	if !ok || raw == "" {
+		return 0, false
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, false
+	}
+	return v, true
 }

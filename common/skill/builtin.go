@@ -13,7 +13,7 @@ type CodeAssistantSkill struct{}
 func (s *CodeAssistantSkill) Name() string        { return "code_assistant" }
 func (s *CodeAssistantSkill) Description() string  { return "专业编程助手，擅长代码生成、审查、重构和调试" }
 func (s *CodeAssistantSkill) Version() string      { return "1.0.0" }
-func (s *CodeAssistantSkill) RequiredTools() []string { return []string{"execute_code"} }
+func (s *CodeAssistantSkill) RequiredTools() []string { return []string{"run_python"} }
 
 func (s *CodeAssistantSkill) SystemPrompt() string {
 	return `你是一个专业的编程助手，擅长代码生成、审查、重构和调试。
@@ -22,7 +22,7 @@ func (s *CodeAssistantSkill) SystemPrompt() string {
 2. 发现 bug 时要说明原因和修复方案
 3. 重构时要保持向后兼容
 4. 代码块使用 markdown 格式化
-5. 如果需要运行代码来验证，请使用 execute_code 工具`
+5. 如果需要运行代码来验证，请使用 run_python 工具`
 }
 
 func (s *CodeAssistantSkill) PreProcess(_ context.Context, _ *SkillContext, messages []*schema.Message) ([]*schema.Message, error) {
@@ -64,7 +64,7 @@ type DataAnalystSkill struct{}
 func (s *DataAnalystSkill) Name() string        { return "data_analyst" }
 func (s *DataAnalystSkill) Description() string  { return "数据分析师，擅长 SQL 查询、统计分析和数据解读" }
 func (s *DataAnalystSkill) Version() string      { return "1.0.0" }
-func (s *DataAnalystSkill) RequiredTools() []string { return []string{"query_database", "execute_code"} }
+func (s *DataAnalystSkill) RequiredTools() []string { return []string{"run_python"} }
 
 func (s *DataAnalystSkill) SystemPrompt() string {
 	return `你是一个数据分析师，擅长 SQL 查询、数据可视化和统计分析。

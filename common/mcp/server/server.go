@@ -2,12 +2,7 @@ package mcpserver
 
 import (
 	"context"
-	"encoding/json"
-	"fmt"
-	"io"
 	"log"
-	"net/http"
-	"strconv"
 	"sync"
 
 	"github.com/mark3labs/mcp-go/mcp"
@@ -121,12 +116,12 @@ func (r *ToolRegistry) VisibleTools(all []mcp.Tool, activeSkills []string) []mcp
 	return out
 }
 
-// DefaultRegistry is the global tool registry. Register tools here before calling StartServer.
+// DefaultRegistry is the global tool registry. The concrete tools live in
+// the sibling `tools` package and are installed at boot time by the caller
+// (typically main.go) via tools.RegisterAll(DefaultRegistry). Splitting the
+// registry from the tool definitions avoids an import cycle and makes the
+// list of available tools an explicit, top-level decision.
 var DefaultRegistry = NewToolRegistry()
-
-func init() {
-	registerBuiltinTools(DefaultRegistry)
-}
 
 // =================== MCP Server ===================
 
@@ -146,128 +141,4 @@ func StartServer(httpAddr string) error {
 	httpServer := server.NewStreamableHTTPServer(mcpServer)
 	log.Printf("MCP server listening on %s/mcp (%d tools registered)", httpAddr, DefaultRegistry.Count())
 	return httpServer.Start(httpAddr)
-}
-
-// =================== Builtin Tools ===================
-
-func registerBuiltinTools(reg *ToolRegistry) {
-	registerWeatherTool(reg)
-	registerEmailTool(reg)
-}
-
-// --- Weather Tool ---
-
-type WttrResponse struct {
-	CurrentCondition []struct {
-		TempC         string `json:"temp_C"`
-		Humidity      string `json:"humidity"`
-		WindspeedKmph string `json:"windspeedKmph"`
-		WeatherDesc   []struct {
-			Value string `json:"value"`
-		} `json:"weatherDesc"`
-	} `json:"current_condition"`
-	NearestArea []struct {
-		AreaName []struct {
-			Value string `json:"value"`
-		} `json:"areaName"`
-	} `json:"nearest_area"`
-}
-
-func registerWeatherTool(reg *ToolRegistry) {
-	tool := mcp.NewTool(
-		"get_weather",
-		mcp.WithDescription("获取指定城市的实时天气信息，包括温度、湿度、风速等"),
-		mcp.WithString("city", mcp.Description("城市名称，如 Beijing、上海"), mcp.Required()),
-	)
-	reg.Register(tool, handleGetWeather)
-}
-
-func handleGetWeather(ctx context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	args := request.GetArguments()
-	city, ok := args["city"].(string)
-	if !ok || city == "" {
-		return nil, fmt.Errorf("invalid city argument")
-	}
-
-	apiURL := fmt.Sprintf("https://wttr.in/%s?format=j1&lang=zh", city)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("create request failed: %w", err)
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("http request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read response failed: %w", err)
-	}
-
-	var wttrResp WttrResponse
-	if err := json.Unmarshal(body, &wttrResp); err != nil {
-		return nil, fmt.Errorf("json parse failed: %w", err)
-	}
-
-	if len(wttrResp.CurrentCondition) == 0 {
-		return nil, fmt.Errorf("no weather data for city: %s", city)
-	}
-
-	cc := wttrResp.CurrentCondition[0]
-	temp, _ := strconv.ParseFloat(cc.TempC, 64)
-	humidity, _ := strconv.Atoi(cc.Humidity)
-	wind, _ := strconv.ParseFloat(cc.WindspeedKmph, 64)
-
-	location := city
-	if len(wttrResp.NearestArea) > 0 && len(wttrResp.NearestArea[0].AreaName) > 0 {
-		location = wttrResp.NearestArea[0].AreaName[0].Value
-	}
-	condition := "未知"
-	if len(cc.WeatherDesc) > 0 {
-		condition = cc.WeatherDesc[0].Value
-	}
-
-	resultText := fmt.Sprintf(
-		"城市: %s\n温度: %.1f°C\n天气: %s\n湿度: %d%%\n风速: %.1f km/h",
-		location, temp, condition, humidity, wind,
-	)
-	return &mcp.CallToolResult{
-		Content: []mcp.Content{
-			mcp.TextContent{Type: "text", Text: resultText},
-		},
-	}, nil
-}
-
-// --- Email Tool (stub: uses project's existing email infrastructure) ---
-
-func registerEmailTool(reg *ToolRegistry) {
-	tool := mcp.NewTool(
-		"send_email",
-		mcp.WithDescription("发送邮件给指定收件人"),
-		mcp.WithString("to", mcp.Description("收件人邮箱地址"), mcp.Required()),
-		mcp.WithString("subject", mcp.Description("邮件主题"), mcp.Required()),
-		mcp.WithString("body", mcp.Description("邮件正文内容"), mcp.Required()),
-	)
-	reg.Register(tool, handleSendEmail)
-}
-
-func handleSendEmail(_ context.Context, request mcp.CallToolRequest) (*mcp.CallToolResult, error) {
-	args := request.GetArguments()
-	to, _ := args["to"].(string)
-	subject, _ := args["subject"].(string)
-	body, _ := args["body"].(string)
-
-	if to == "" || subject == "" {
-		return nil, fmt.Errorf("to and subject are required")
-	}
-
-	// TODO: integrate with common/email when SMTP is configured
-	resultText := fmt.Sprintf("邮件已准备发送\n收件人: %s\n主题: %s\n正文: %s\n(注意: 需要配置 SMTP 后才能实际发送)", to, subject, body)
-	return &mcp.CallToolResult{
-		Content: []mcp.Content{
-			mcp.TextContent{Type: "text", Text: resultText},
-		},
-	}, nil
 }

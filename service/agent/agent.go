@@ -2,11 +2,11 @@ package agent
 
 import (
 	"GopherAI/common/agent"
+	"GopherAI/common/aihelper"
 	"GopherAI/common/code"
 	mcpclient "GopherAI/common/mcp/client"
 	"GopherAI/config"
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -14,6 +14,7 @@ import (
 	"sync"
 
 	"github.com/cloudwego/eino-ext/components/model/openai"
+	"github.com/google/uuid"
 )
 
 var (
@@ -91,46 +92,70 @@ func ExecuteTask(userName string, sessionID string, task string) (*agent.AgentRe
 	return result, code.CodeSuccess
 }
 
-// sseEvent is a properly typed SSE data payload for agent events.
-type sseEvent struct {
-	Type    string `json:"type"`
-	Content string `json:"content"`
-	Step    int    `json:"step"`
-}
-
+// StreamExecuteTask drives the agent loop over SSE using the shared
+// aihelper.StreamEvent envelope. Mapping from agent.AgentEvent → StreamEvent
+// happens here so the frontend doesn't need a separate parser for /agent
+// endpoints versus /chat endpoints — one renderer handles both.
 func StreamExecuteTask(userName string, sessionID string, task string, writer http.ResponseWriter) code.Code {
 	flusher, ok := writer.(http.Flusher)
 	if !ok {
 		return code.CodeServerBusy
 	}
 
-	ctx := context.Background()
+	traceID := uuid.New().String()
+	ctx := agent.WithTraceID(context.Background(), traceID)
+
 	a, err := getOrCreateAgent(ctx, userName, sessionID)
 	if err != nil {
 		log.Printf("StreamExecuteTask getOrCreateAgent error: %v", err)
 		return code.AIModelFail
 	}
 
-	writeSSE := func(evt sseEvent) {
-		data, _ := json.Marshal(evt)
-		writer.Write([]byte("data: " + string(data) + "\n\n"))
+	writeEvent := func(evt aihelper.StreamEvent) {
+		if evt.TraceID == "" {
+			evt.TraceID = traceID
+		}
+		writer.Write(append([]byte("data: "), append(evt.Encode(), []byte("\n\n")...)...))
 		flusher.Flush()
 	}
 
+	writeEvent(aihelper.SessionStartEvent(sessionID, traceID))
+
 	cb := func(event agent.AgentEvent) {
-		writeSSE(sseEvent{Type: event.Type, Content: event.Content, Step: event.Step})
+		writeEvent(agentEventToStreamEvent(event))
 	}
 
 	result, err := a.StreamExecute(ctx, task, cb)
 	if err != nil {
 		log.Printf("StreamExecuteTask error: %v", err)
-		writeSSE(sseEvent{Type: "error", Content: err.Error(), Step: 0})
+		writeEvent(aihelper.ErrorEvent(err.Error()))
 		return code.AIModelFail
 	}
 
-	writeSSE(sseEvent{Type: "done", Content: result.FinalAnswer, Step: result.TotalSteps})
-	writer.Write([]byte("data: [DONE]\n\n"))
-	flusher.Flush()
-
+	if result != nil && result.FinalAnswer != "" {
+		writeEvent(aihelper.StreamEvent{Type: "answer", Data: result.FinalAnswer, Step: result.TotalSteps})
+	}
+	writeEvent(aihelper.DoneEvent())
 	return code.CodeSuccess
+}
+
+// agentEventToStreamEvent maps the legacy AgentEvent enum onto the unified
+// StreamEvent shape. Tool events lose the human-readable preamble ("调用工具
+// X:") because the frontend now renders them from structured fields, so we
+// pass the raw content through as Args / Preview rather than re-formatting.
+func agentEventToStreamEvent(e agent.AgentEvent) aihelper.StreamEvent {
+	switch e.Type {
+	case "thinking":
+		return aihelper.StreamEvent{Type: "thinking", Data: e.Content, Step: e.Step}
+	case "tool_call":
+		return aihelper.StreamEvent{Type: "tool_call", Tool: "", Data: e.Content, Step: e.Step}
+	case "tool_result":
+		return aihelper.StreamEvent{Type: "tool_result", Preview: e.Content, Step: e.Step}
+	case "answer":
+		return aihelper.StreamEvent{Type: "answer", Data: e.Content, Step: e.Step}
+	case "error":
+		return aihelper.ErrorEvent(e.Content)
+	default:
+		return aihelper.StreamEvent{Type: e.Type, Data: e.Content, Step: e.Step}
+	}
 }

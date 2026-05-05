@@ -65,6 +65,23 @@ func (f *AIModelFactory) registerBuiltinCreators() {
 		}
 		return NewOllamaModel(ctx, baseURL, modelName)
 	}
+
+	// modelType=5 is the unified "all-in-one" chat — RAG, web search,
+	// tools, agent loop and skill prompts all live behind a single
+	// SmartModel governed by ENABLE_TOOLS / ENABLE_SKILLS / ENABLE_AGENT_LOOP.
+	// This is the default the frontend uses; modelTypes 1-4 stay as
+	// developer-only smoke targets.
+	f.creators["5"] = func(ctx context.Context, config map[string]interface{}) (AIModel, error) {
+		username, ok := config["username"].(string)
+		if !ok {
+			return nil, fmt.Errorf("smart model requires username")
+		}
+		sessionID, ok := config["sessionID"].(string)
+		if !ok || sessionID == "" {
+			return nil, fmt.Errorf("smart model requires sessionID")
+		}
+		return NewSmartModel(ctx, username, sessionID)
+	}
 }
 
 func (f *AIModelFactory) CreateAIModel(ctx context.Context, modelType string, config map[string]interface{}) (AIModel, error) {

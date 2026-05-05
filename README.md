@@ -17,6 +17,19 @@ GopherAI 是一个以 Go 后端为主体、Vue 前端为交互入口、Python Wo
 
 当前阶段重点已经从“链路打通”进入“可观测、可测试、切分策略和召回效果优化”。
 
+## 全能聊天模式（modelType=5）
+
+前端只暴露一种「全能聊天」入口（`/ai-chat`）：用户提问后，由 SmartModel 决定要不要调用工具、调用哪些工具，
+并把整个过程通过结构化 SSE 事件推到前端，渲染为可折叠的工具卡片（args / preview / 状态 / 耗时 / 重试次数）。
+
+- **工具集**：15 个全局工具（时间、计算器、IP 信息、GitHub、PyPI、NPM、汇率、词典、抓网页、RAG、文档列表、Tavily 搜索等）
+  + 1 个 Skill 专属工具（`run_python`，仅在 `code_assistant` 或 `data_analyst` 激活时可见）。
+- **可观测性**：每次工具调用按 attempt 维度落库到 `tool_invocations`，`trace_id` 在 SSE 头帧与日志全程贯通。
+- **可治理性**：`ENABLE_TOOLS` / `ENABLE_SKILLS` / `ENABLE_AGENT_LOOP` 三个环境变量可分别关闭工具绑定、技能 prompt 注入、多轮 agent 循环，
+  无需重启即可逐项 A/B 验证。
+
+详细 demo 流程见 `test/manual/tool-use-smoke.md`，重构设计文档见 `doc/mcp-tool-overhaul-plan.md`。
+
 ## 技术栈
 
 ### 前端

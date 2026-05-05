@@ -23,13 +23,24 @@
       <div class="top-bar">
         <button class="back-btn" @click="handleLogout">退出登录</button>
         <button class="sync-btn" @click="syncHistory" :disabled="!currentSessionId || tempSession">同步历史数据</button>
-        <label for="modelType">选择模型：</label>
-        <select id="modelType" v-model="selectedModel" class="model-select">
-          <option value="1">DeepSeek V4 Pro</option>
-          <option value="2">RAG（旧流程，待迁移）</option>
-          <option value="3">DeepSeek MCP</option>
-        </select>
-        <label for="streamingMode" style="margin-left: 20px;">
+
+        <!-- Skill 多选：激活后才能让 AI 看到对应的专属工具（如 run_python） -->
+        <div class="skills-picker" v-if="skills.length">
+          <span class="skills-label">技能：</span>
+          <button
+            v-for="s in skills"
+            :key="s.name"
+            type="button"
+            class="skill-chip"
+            :class="{ active: activeSkills.includes(s.name) }"
+            :title="s.description"
+            @click="toggleSkill(s.name)"
+          >
+            {{ skillLabel(s.name) }}
+          </button>
+        </div>
+
+        <label for="streamingMode" style="margin-left: 8px;">
           <input type="checkbox" id="streamingMode" v-model="isStreaming" />
           流式响应
         </label>
@@ -51,10 +62,36 @@
         >
           <div class="message-header">
             <b>{{ message.role === 'user' ? '你' : 'AI' }}:</b>
-            <button v-if="message.role === 'assistant'" class="tts-btn" @click="playTTS(message.content)">🔊</button>
             <span v-if="message.meta && message.meta.status === 'streaming'" class="streaming-indicator"> ··</span>
           </div>
           <div class="message-content" v-html="renderMarkdown(message.content)"></div>
+
+          <!-- 工具调用卡片：每次 LLM 调用工具会插入一张折叠卡，
+               展开后看到完整 args / preview / 状态 / 重试次数 / 耗时。 -->
+          <div v-if="message.toolCalls && message.toolCalls.length" class="tool-cards">
+            <div
+              v-for="card in message.toolCalls"
+              :key="card.callId || card.tool + card.args"
+              class="tool-card"
+              :class="['status-' + card.status]"
+            >
+              <div class="tool-card-header" @click="card.expanded = !card.expanded">
+                <span class="tool-status-dot">{{ statusEmoji(card.status) }}</span>
+                <span class="tool-name">{{ card.tool || '(unknown tool)' }}</span>
+                <span class="tool-meta">
+                  <template v-if="card.attempts > 1">· retry {{ card.attempts }}</template>
+                  <template v-if="card.durationMs">· {{ card.durationMs }}ms</template>
+                </span>
+                <span class="tool-toggle">{{ card.expanded ? '▴' : '▾' }}</span>
+              </div>
+              <div v-if="card.expanded" class="tool-card-body">
+                <div class="tool-section-title">args</div>
+                <pre class="tool-pre">{{ formatArgs(card.args) }}</pre>
+                <div class="tool-section-title">preview</div>
+                <pre class="tool-pre">{{ card.preview || '(pending...)' }}</pre>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -101,19 +138,114 @@ export default {
     const loading = ref(false)
     const messagesRef = ref(null)
     const messageInput = ref(null)
-    const selectedModel = ref('1')
-    const isStreaming = ref(false)
+    // Default to streaming on for the all-in-one chat: token + tool events
+    // are most useful when watched live.
+    const isStreaming = ref(true)
     const uploading = ref(false)
     const fileInput = ref(null)
 
+    // Skills: list pulled from /AI/skills/list, active set is per-session and
+    // refreshed whenever the user switches sessions.
+    const skills = ref([])
+    const activeSkills = ref([])
+
+
+    const escapeHtml = (value) => String(value)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;')
+
+    const renderInlineMarkdown = (value) => escapeHtml(value)
+      .replace(/`([^`]+)`/g, '<code>$1</code>')
+      .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+      .replace(/\*([^*]+)\*/g, '<em>$1</em>')
 
     const renderMarkdown = (text) => {
       if (!text && text !== '') return ''
-      return String(text)
-        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-        .replace(/\*(.*?)\*/g, '<em>$1</em>')
-        .replace(/`(.*?)`/g, '<code>$1</code>')
-        .replace(/\n/g, '<br>')
+
+      const lines = String(text).replace(/\r\n/g, '\n').split('\n')
+      const html = []
+      let inCodeBlock = false
+      let listOpen = false
+      let paragraph = []
+
+      const closeParagraph = () => {
+        if (paragraph.length > 0) {
+          html.push(`<p>${paragraph.map(renderInlineMarkdown).join('<br>')}</p>`)
+          paragraph = []
+        }
+      }
+      const closeList = () => {
+        if (listOpen) {
+          html.push('</ul>')
+          listOpen = false
+        }
+      }
+
+      for (const rawLine of lines) {
+        const line = rawLine.trimEnd()
+        const trimmed = line.trim()
+
+        if (trimmed.startsWith('```')) {
+          closeParagraph()
+          closeList()
+          if (inCodeBlock) {
+            html.push('</code></pre>')
+            inCodeBlock = false
+          } else {
+            html.push('<pre><code>')
+            inCodeBlock = true
+          }
+          continue
+        }
+
+        if (inCodeBlock) {
+          html.push(escapeHtml(rawLine) + '\n')
+          continue
+        }
+
+        if (!trimmed) {
+          closeParagraph()
+          closeList()
+          continue
+        }
+
+        if (/^---+$/.test(trimmed)) {
+          closeParagraph()
+          closeList()
+          html.push('<hr>')
+          continue
+        }
+
+        const heading = trimmed.match(/^(#{1,4})\s+(.+)$/)
+        if (heading) {
+          closeParagraph()
+          closeList()
+          const level = heading[1].length
+          html.push(`<h${level}>${renderInlineMarkdown(heading[2])}</h${level}>`)
+          continue
+        }
+
+        const bullet = trimmed.match(/^[-*]\s+(.+)$/)
+        if (bullet) {
+          closeParagraph()
+          if (!listOpen) {
+            html.push('<ul>')
+            listOpen = true
+          }
+          html.push(`<li>${renderInlineMarkdown(bullet[1])}</li>`)
+          continue
+        }
+
+        paragraph.push(line)
+      }
+
+      closeParagraph()
+      closeList()
+      if (inCodeBlock) html.push('</code></pre>')
+      return html.join('')
     }
 
     const playTTS = async (text) => {
@@ -214,6 +346,7 @@ export default {
       if (!sessionId) return
       currentSessionId.value = String(sessionId)
       tempSession.value = false
+      refreshActiveSkills(currentSessionId.value)
 
       // lazy load history if not present
       if (!sessions.value[sessionId].messages || sessions.value[sessionId].messages.length === 0) {
@@ -316,15 +449,24 @@ export default {
     }
 
 
+    // handleStreaming consumes the unified SSE protocol from the backend
+    // (see common/aihelper.StreamEvent). Every frame is a `data: <json>\n\n`
+    // line with a `type` field; we dispatch on that:
+    //   - session     → adopt sessionId/traceId, swap out the temp session
+    //   - token       → append to the current AI bubble's content
+    //   - tool_call   → push a pending tool card under the AI bubble
+    //   - tool_result → update the matching card's status / preview / timing
+    //   - answer      → final assistant content (Agent path; also accepted here)
+    //   - error       → surface a toast and mark the bubble as errored
+    //   - done        → mark stream complete, stop the spinner
     async function handleStreaming(question) {
-
       const aiMessage = {
         role: 'assistant',
         content: '',
-        meta: { status: 'streaming' } // mark streaming
+        meta: { status: 'streaming' },
+        traceId: '',
+        toolCalls: []
       }
-
-
       const aiMessageIndex = currentMessages.value.length
       currentMessages.value.push(aiMessage)
 
@@ -333,22 +475,126 @@ export default {
         sessions.value[currentSessionId.value].messages.push({ role: 'assistant', content: '' })
       }
 
-
       const url = tempSession.value
-        ? '/api/AI/chat/send-stream-new-session'  
-        : '/api/AI/chat/send-stream'           
+        ? '/api/AI/chat/send-stream-new-session'
+        : '/api/AI/chat/send-stream'
 
       const headers = {
+        'Accept': 'text/event-stream',
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${localStorage.getItem('token') || ''}`
       }
 
+      // modelType is intentionally omitted: the server falls back to the
+      // configured default (modelType=5/SmartModel). Legacy values can still
+      // be set manually for smoke testing.
       const body = tempSession.value
-        ? { question: question, modelType: selectedModel.value }
-        : { question: question, modelType: selectedModel.value, sessionId: currentSessionId.value }
+        ? { question }
+        : { question, sessionId: currentSessionId.value }
+
+      const dispatchEvent = (evt) => {
+        if (!evt || typeof evt !== 'object') return
+        switch (evt.type) {
+          case 'session':
+            if (evt.session_id) {
+              const newSid = String(evt.session_id)
+              if (tempSession.value) {
+                sessions.value[newSid] = {
+                  id: newSid,
+                  name: '新会话',
+                  messages: [...currentMessages.value]
+                }
+                currentSessionId.value = newSid
+                tempSession.value = false
+                // Now that we have a real session, fetch its skill state.
+                refreshActiveSkills(newSid)
+              }
+            }
+            if (evt.trace_id) {
+              currentMessages.value[aiMessageIndex].traceId = evt.trace_id
+            }
+            break
+
+          case 'token':
+            currentMessages.value[aiMessageIndex].content += (evt.data || '')
+            currentMessages.value = [...currentMessages.value]
+            nextTick(scrollToBottom)
+            break
+
+          case 'tool_call': {
+            // Insert a placeholder card; tool_result will fill it in.
+            const card = {
+              tool: evt.tool || '',
+              callId: evt.call_id || '',
+              args: evt.args || '',
+              preview: '',
+              status: 'pending',
+              attempts: 0,
+              durationMs: 0,
+              expanded: false
+            }
+            currentMessages.value[aiMessageIndex].toolCalls.push(card)
+            break
+          }
+
+          case 'tool_result': {
+            const cards = currentMessages.value[aiMessageIndex].toolCalls
+            // Match by callId first; if the backend ever omits it, fall
+            // back to the most recent pending card for the same tool.
+            let target = cards.find(c => c.callId && c.callId === evt.call_id)
+            if (!target) {
+              target = [...cards].reverse().find(c => c.tool === evt.tool && c.status === 'pending')
+            }
+            if (target) {
+              target.tool = evt.tool || target.tool
+              target.status = evt.status || 'success'
+              target.preview = evt.preview || ''
+              target.attempts = evt.attempts || 1
+              target.durationMs = evt.duration_ms || 0
+            } else {
+              currentMessages.value[aiMessageIndex].toolCalls.push({
+                tool: evt.tool || '',
+                callId: evt.call_id || '',
+                args: '',
+                preview: evt.preview || '',
+                status: evt.status || 'success',
+                attempts: evt.attempts || 1,
+                durationMs: evt.duration_ms || 0,
+                expanded: false
+              })
+            }
+            break
+          }
+
+          case 'answer':
+            // Agent path emits a final summarized answer; append if it adds
+            // anything beyond what tokens already streamed.
+            if (evt.data && !currentMessages.value[aiMessageIndex].content.endsWith(evt.data)) {
+              currentMessages.value[aiMessageIndex].content += evt.data
+            }
+            break
+
+          case 'thinking':
+            // Reserved for future inline reasoning UI; ignore for now.
+            break
+
+          case 'error':
+            console.error('[SSE] error event:', evt.data)
+            currentMessages.value[aiMessageIndex].meta = { status: 'error' }
+            ElMessage.error(evt.data || '后端报错')
+            break
+
+          case 'done':
+            currentMessages.value[aiMessageIndex].meta = { status: 'done' }
+            break
+
+          default:
+            console.debug('[SSE] unknown event type:', evt.type, evt)
+        }
+        currentMessages.value = [...currentMessages.value]
+      }
 
       try {
-        // 创建 fetch 连接读取 SSE 流
         const response = await fetch(url, {
           method: 'POST',
           headers,
@@ -364,84 +610,66 @@ export default {
         const decoder = new TextDecoder()
         let buffer = ''
 
-        // 读取流数据
         // eslint-disable-next-line no-constant-condition
         while (true) {
           const { done, value } = await reader.read()
           if (done) break
 
-          const chunk = decoder.decode(value, { stream: true })
-          buffer += chunk
+          buffer += decoder.decode(value, { stream: true })
 
-          // 按行分割
-          const lines = buffer.split('\n')
-          buffer = lines.pop() || '' // 保留未完成的行
+          const frames = buffer.split(/\r?\n\r?\n/)
+          buffer = frames.pop() || ''
 
-          for (const line of lines) {
-            const trimmedLine = line.trim()
-            if (!trimmedLine) continue
+          for (const frame of frames) {
+            const dataLines = frame
+              .split(/\r?\n/)
+              .map(line => line.trim())
+              .filter(line => line.startsWith('data:'))
 
-            // 处理 SSE 格式：data: <content>
-            if (trimmedLine.startsWith('data:')) {
-              const data = trimmedLine.slice(5).trim()
-              console.log('[SSE] Received:', data) // 调试日志
+            if (!dataLines.length) continue
+            const payload = dataLines.map(line => line.slice(5).trim()).join('\n')
+            if (!payload) continue
 
-              if (data === '[DONE]') {
-                // 流结束
-                console.log('[SSE] Stream done')
-                loading.value = false
-                currentMessages.value[aiMessageIndex].meta = { status: 'done' }
-                currentMessages.value = [...currentMessages.value]
-              } else if (data.startsWith('{')) {
-                // 尝试解析 JSON（如 sessionId）
-                try {
-                  const parsed = JSON.parse(data)
-                  if (parsed.sessionId) {
-                    const newSid = String(parsed.sessionId)
-                    console.log('[SSE] Session ID:', newSid)
-                    if (tempSession.value) {
-                      sessions.value[newSid] = {
-                        id: newSid,
-                        name: '新会话',
-                        messages: [...currentMessages.value]
-                      }
-                      currentSessionId.value = newSid
-                      tempSession.value = false
-                    }
-                  }
-                } catch (e) {
-                  // 不是 JSON，当作普通文本处理
-                  currentMessages.value[aiMessageIndex].content += data
-                  console.log('[SSE] Content updated:', currentMessages.value[aiMessageIndex].content.length)
-                }
-              } else {
-                // 普通文本数据，直接追加
-                // 使用数组索引直接更新，强制 Vue 响应式系统检测变化
-                currentMessages.value[aiMessageIndex].content += data
-                console.log('[SSE] Content updated:', currentMessages.value[aiMessageIndex].content.length)
-              }
-
-              // 每收到一条数据就立即更新 DOM
-              // 强制更新整个数组以触发响应式
-              currentMessages.value = [...currentMessages.value]
-              
-              // 使用 requestAnimationFrame 强制浏览器重排
-              await new Promise(resolve => {
-                requestAnimationFrame(() => {
-                  scrollToBottom()
-                  resolve()
-                })
-              })
+            // Backwards-compat: legacy `[DONE]` sentinel.
+            if (payload === '[DONE]') {
+              dispatchEvent({ type: 'done' })
+              continue
             }
+
+            let parsed
+            try {
+              parsed = JSON.parse(payload)
+            } catch (e) {
+              // Non-JSON payload (e.g. very old server): treat as a token.
+              dispatchEvent({ type: 'token', data: payload })
+              continue
+            }
+            dispatchEvent(parsed)
+          }
+
+          await new Promise(resolve => requestAnimationFrame(() => { scrollToBottom(); resolve() }))
+        }
+
+        const remainingPayload = buffer
+          .split(/\r?\n/)
+          .map(line => line.trim())
+          .filter(line => line.startsWith('data:'))
+          .map(line => line.slice(5).trim())
+          .join('\n')
+        if (remainingPayload) {
+          try {
+            dispatchEvent(remainingPayload === '[DONE]' ? { type: 'done' } : JSON.parse(remainingPayload))
+          } catch (e) {
+            dispatchEvent({ type: 'token', data: remainingPayload })
           }
         }
 
-        // 流读取完成后的处理
         loading.value = false
-        currentMessages.value[aiMessageIndex].meta = { status: 'done' }
+        if (currentMessages.value[aiMessageIndex].meta?.status !== 'error') {
+          currentMessages.value[aiMessageIndex].meta = { status: 'done' }
+        }
         currentMessages.value = [...currentMessages.value]
 
-        // 同步到 sessions 存储
         if (!tempSession.value && currentSessionId.value && sessions.value[currentSessionId.value]) {
           const sessMsgs = sessions.value[currentSessionId.value].messages
           if (Array.isArray(sessMsgs) && sessMsgs.length) {
@@ -462,41 +690,32 @@ export default {
 
 
     async function handleNormal(question) {
+      // Non-streaming fallback. modelType is omitted so the server picks
+      // its configured default (modelType=5/SmartModel).
       if (tempSession.value) {
-
-        const response = await api.post('/AI/chat/send-new-session', {
-          question: question,
-          modelType: selectedModel.value
-        })
+        const response = await api.post('/AI/chat/send-new-session', { question })
         if (response.data && response.data.status_code === 1000) {
           const sessionId = String(response.data.sessionId)
-          const aiMessage = {
-            role: 'assistant',
-            content: response.data.Information || ''
-          }
-
+          const aiMessage = { role: 'assistant', content: response.data.Information || '' }
           sessions.value[sessionId] = {
             id: sessionId,
             name: '新会话',
-            messages: [ { role: 'user', content: question }, aiMessage ]
+            messages: [{ role: 'user', content: question }, aiMessage]
           }
           currentSessionId.value = sessionId
           tempSession.value = false
           currentMessages.value = [...sessions.value[sessionId].messages]
+          refreshActiveSkills(sessionId)
         } else {
           ElMessage.error(response.data?.status_msg || '发送失败')
-
           currentMessages.value.pop()
         }
       } else {
-
         const sessionMsgs = sessions.value[currentSessionId.value].messages
-
         sessionMsgs.push({ role: 'user', content: question })
 
         const response = await api.post('/AI/chat/send', {
-          question: question,
-          modelType: selectedModel.value,
+          question,
           sessionId: currentSessionId.value
         })
         if (response.data && response.data.status_code === 1000) {
@@ -505,7 +724,7 @@ export default {
           currentMessages.value = [...sessionMsgs]
         } else {
           ElMessage.error(response.data?.status_msg || '发送失败')
-          sessionMsgs.pop() // rollback
+          sessionMsgs.pop()
           currentMessages.value.pop()
         }
       }
@@ -525,6 +744,105 @@ export default {
     const triggerFileUpload = () => {
       if (fileInput.value) {
         fileInput.value.click()
+      }
+    }
+
+    // ---------- Skills ----------
+
+    const loadSkills = async () => {
+      try {
+        const response = await api.get('/AI/skills/list')
+        if (response.data && response.data.status_code === 1000 && Array.isArray(response.data.skills)) {
+          skills.value = response.data.skills
+        }
+      } catch (err) {
+        console.error('Load skills error:', err)
+      }
+    }
+
+    const refreshActiveSkills = async (sessionId) => {
+      if (!sessionId || sessionId === 'temp') {
+        activeSkills.value = []
+        return
+      }
+      try {
+        const response = await api.post('/AI/skills/active', { sessionId })
+        if (response.data && response.data.status_code === 1000) {
+          activeSkills.value = response.data.activeSkills || []
+        }
+      } catch (err) {
+        console.error('Load active skills error:', err)
+      }
+    }
+
+    const toggleSkill = async (skillName) => {
+      // Skills are session-scoped on the server. If the user toggled before
+      // a real session exists, queue the toggle locally and apply once the
+      // first message creates the session.
+      if (!currentSessionId.value || currentSessionId.value === 'temp' || tempSession.value) {
+        if (activeSkills.value.includes(skillName)) {
+          activeSkills.value = activeSkills.value.filter(n => n !== skillName)
+        } else {
+          activeSkills.value = [...activeSkills.value, skillName]
+        }
+        ElMessage.info('技能将在新会话开始后生效')
+        return
+      }
+      const isActive = activeSkills.value.includes(skillName)
+      const path = isActive ? '/AI/skills/deactivate' : '/AI/skills/activate'
+      try {
+        const response = await api.post(path, { sessionId: currentSessionId.value, skillName })
+        if (response.data && response.data.status_code === 1000) {
+          if (isActive) {
+            activeSkills.value = activeSkills.value.filter(n => n !== skillName)
+          } else {
+            activeSkills.value = [...activeSkills.value, skillName]
+          }
+        } else {
+          ElMessage.error(response.data?.status_msg || '技能切换失败')
+        }
+      } catch (err) {
+        console.error('Toggle skill error:', err)
+        ElMessage.error('技能切换失败')
+      }
+    }
+
+    const skillLabel = (name) => {
+      const map = {
+        code_assistant: '编程',
+        translator: '翻译',
+        data_analyst: '数据分析',
+        writing_assistant: '写作'
+      }
+      return map[name] || name
+    }
+
+    // ---------- Tool card helpers ----------
+
+    const statusEmoji = (status) => {
+      switch (status) {
+        case 'success': return '✅'
+        case 'error': return '❌'
+        case 'timeout': return '⏱'
+        case 'cancelled': return '🚫'
+        case 'pending':
+        default: return '⏳'
+      }
+    }
+
+    // formatArgs pretty-prints LLM tool arguments. Args reach us as a
+    // JSON-encoded string (per OpenAI function-calling); we try to parse
+    // and re-stringify with indentation so the expanded card is readable.
+    const formatArgs = (args) => {
+      if (!args) return '(none)'
+      if (typeof args !== 'string') {
+        try { return JSON.stringify(args, null, 2) } catch (e) { return String(args) }
+      }
+      try {
+        const obj = JSON.parse(args)
+        return JSON.stringify(obj, null, 2)
+      } catch (e) {
+        return args
       }
     }
 
@@ -588,9 +906,9 @@ export default {
 
     onMounted(() => {
       loadSessions()
+      loadSkills()
     })
 
-    // expose to template
     return {
       sessions: computed(() => Object.values(sessions.value)),
       currentSessionId,
@@ -600,10 +918,11 @@ export default {
       loading,
       messagesRef,
       messageInput,
-      selectedModel,
       isStreaming,
       uploading,
       fileInput,
+      skills,
+      activeSkills,
       renderMarkdown,
       playTTS,
       createNewSession,
@@ -612,7 +931,11 @@ export default {
       sendMessage,
       triggerFileUpload,
       handleFileUpload,
-      handleLogout
+      handleLogout,
+      toggleSkill,
+      skillLabel,
+      statusEmoji,
+      formatArgs
     }
   }
 }
@@ -810,6 +1133,119 @@ export default {
   transition: all 0.2s ease;
 }
 
+.skills-picker {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-left: 8px;
+}
+
+.skills-label {
+  color: #2c3e50;
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.skill-chip {
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(102, 126, 234, 0.4);
+  background: rgba(255, 255, 255, 0.85);
+  color: #4a5568;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.18s ease;
+}
+
+.skill-chip:hover {
+  background: rgba(102, 126, 234, 0.1);
+}
+
+.skill-chip.active {
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  border-color: transparent;
+  color: white;
+  box-shadow: 0 2px 10px rgba(102, 126, 234, 0.35);
+}
+
+/* Tool call cards rendered inline below an AI message. They are styled to
+   read as a developer panel — monospace, subtle background — so the user
+   immediately knows this is structured tool activity, not chat content. */
+.tool-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.tool-card {
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.04);
+  font-family: Menlo, Consolas, monospace;
+  font-size: 12px;
+  color: #2c3e50;
+  overflow: hidden;
+}
+
+.tool-card.status-pending { border-color: rgba(64, 158, 255, 0.4); }
+.tool-card.status-success { border-color: rgba(103, 194, 58, 0.4); }
+.tool-card.status-error { border-color: rgba(245, 87, 108, 0.5); }
+.tool-card.status-timeout { border-color: rgba(245, 158, 11, 0.5); }
+
+.tool-card-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.tool-status-dot {
+  font-size: 14px;
+}
+
+.tool-name {
+  font-weight: 700;
+}
+
+.tool-meta {
+  color: #6b7280;
+  font-size: 11px;
+  margin-left: auto;
+}
+
+.tool-toggle {
+  color: #6b7280;
+}
+
+.tool-card-body {
+  padding: 0 12px 10px 12px;
+  border-top: 1px dashed rgba(0, 0, 0, 0.08);
+}
+
+.tool-section-title {
+  margin-top: 8px;
+  color: #6b7280;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.tool-pre {
+  margin: 4px 0 0 0;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.7);
+  border-radius: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
 .upload-btn {
   background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
   color: white;
@@ -932,23 +1368,6 @@ export default {
   font-weight: 600;
 }
 
-.tts-btn {
-  padding: 6px 10px;
-  border-radius: 8px;
-  font-size: 12px;
-  cursor: pointer;
-  background: linear-gradient(135deg, #67c23a 0%, #409eff 100%);
-  color: white;
-  border: none;
-  transition: all 0.18s ease;
-  box-shadow: 0 2px 8px rgba(103, 194, 58, 0.18);
-}
-
-.tts-btn:hover {
-  transform: scale(1.05);
-  box-shadow: 0 4px 12px rgba(103, 194, 58, 0.25);
-}
-
 .streaming-indicator {
   color: #999;
   font-weight: 600;
@@ -957,8 +1376,62 @@ export default {
 
 /* message content */
 .message-content {
-  white-space: pre-wrap;
+  white-space: normal;
   word-break: break-word;
+}
+
+.message-content :deep(p) {
+  margin: 0 0 10px 0;
+}
+
+.message-content :deep(p:last-child) {
+  margin-bottom: 0;
+}
+
+.message-content :deep(h1),
+.message-content :deep(h2),
+.message-content :deep(h3),
+.message-content :deep(h4) {
+  margin: 12px 0 8px;
+  line-height: 1.35;
+  font-weight: 700;
+}
+
+.message-content :deep(h1) { font-size: 1.35em; }
+.message-content :deep(h2) { font-size: 1.24em; }
+.message-content :deep(h3) { font-size: 1.14em; }
+.message-content :deep(h4) { font-size: 1.06em; }
+
+.message-content :deep(hr) {
+  border: none;
+  border-top: 1px solid rgba(0, 0, 0, 0.12);
+  margin: 12px 0;
+}
+
+.message-content :deep(ul) {
+  margin: 6px 0 10px 20px;
+  padding: 0;
+}
+
+.message-content :deep(li) {
+  margin: 4px 0;
+}
+
+.message-content :deep(code) {
+  padding: 2px 5px;
+  border-radius: 5px;
+  background: rgba(0, 0, 0, 0.06);
+  font-family: Menlo, Consolas, monospace;
+  font-size: 0.92em;
+}
+
+.message-content :deep(pre) {
+  margin: 10px 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.06);
+  overflow-x: auto;
+  white-space: pre-wrap;
 }
 
 /* input area */

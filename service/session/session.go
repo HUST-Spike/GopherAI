@@ -3,6 +3,7 @@ package session
 import (
 	"GopherAI/common/aihelper"
 	"GopherAI/common/code"
+	"GopherAI/config"
 	"GopherAI/dao/session"
 	"GopherAI/model"
 	"context"
@@ -11,6 +12,20 @@ import (
 
 	"github.com/google/uuid"
 )
+
+// resolveModelType applies the server-side default when the client omits
+// modelType. This keeps the new "all-in-one" frontend (which never sends
+// modelType) working while still letting smoke tests pin a specific model
+// (1=OpenAI, 2=RAG, 3=raw MCP, 4=Ollama, 5=SmartModel).
+func resolveModelType(modelType string) string {
+	if modelType != "" {
+		return modelType
+	}
+	if d := config.GetConfig().AIModelConfig.DefaultModelType; d != "" {
+		return d
+	}
+	return "5"
+}
 
 func GetUserSessionsByUserName(userName string) ([]model.SessionInfo, error) {
 	manager := aihelper.GetGlobalManager()
@@ -27,6 +42,7 @@ func GetUserSessionsByUserName(userName string) ([]model.SessionInfo, error) {
 }
 
 func CreateSessionAndSendMessage(userName string, userQuestion string, modelType string) (string, string, code.Code) {
+	modelType = resolveModelType(modelType)
 	newSession := &model.Session{
 		ID:        uuid.New().String(),
 		UserName:  userName,
@@ -61,6 +77,7 @@ func CreateSessionAndSendMessage(userName string, userQuestion string, modelType
 }
 
 func CreateStreamSessionOnly(userName string, userQuestion string, modelType string) (string, code.Code) {
+	modelType = resolveModelType(modelType)
 	newSession := &model.Session{
 		ID:        uuid.New().String(),
 		UserName:  userName,
@@ -82,6 +99,7 @@ func StreamMessageToExistingSession(userName string, sessionID string, userQuest
 		return code.CodeServerBusy
 	}
 
+	modelType = resolveModelType(modelType)
 	manager := aihelper.GetGlobalManager()
 	cfg := map[string]interface{}{
 		"username":  userName,
@@ -93,29 +111,35 @@ func StreamMessageToExistingSession(userName string, sessionID string, userQuest
 		return code.AIModelFail
 	}
 
-	cb := func(msg string) {
-		_, err := writer.Write([]byte("data: " + msg + "\n\n"))
-		if err != nil {
+	traceID := uuid.New().String()
+	writeEvt := func(evt aihelper.StreamEvent) {
+		if _, err := writer.Write(append([]byte("data: "), append(evt.Encode(), []byte("\n\n")...)...)); err != nil {
 			log.Println("[SSE] Write error:", err)
 			return
 		}
 		flusher.Flush()
 	}
 
-	ctx := context.Background()
-	_, err = helper.StreamResponse(userName, ctx, cb, userQuestion)
-	if err != nil {
+	// First frame ties session + trace together so the frontend (and grep'ing
+	// devs) can correlate every later event with the same trace_id row in
+	// tool_invocations.
+	writeEvt(aihelper.SessionStartEvent(sessionID, traceID))
+
+	cb := func(evt aihelper.StreamEvent) {
+		if evt.TraceID == "" {
+			evt.TraceID = traceID
+		}
+		writeEvt(evt)
+	}
+
+	ctx := aihelper.WithTraceID(context.Background(), traceID)
+	if _, err := helper.StreamResponse(userName, ctx, cb, userQuestion); err != nil {
 		log.Println("StreamMessageToExistingSession StreamResponse error:", err)
+		writeEvt(aihelper.StreamEvent{Type: "error", Data: err.Error(), TraceID: traceID})
 		return code.AIModelFail
 	}
 
-	_, err = writer.Write([]byte("data: [DONE]\n\n"))
-	if err != nil {
-		log.Println("StreamMessageToExistingSession write DONE error:", err)
-		return code.AIModelFail
-	}
-	flusher.Flush()
-
+	writeEvt(aihelper.StreamEvent{Type: "done", TraceID: traceID})
 	return code.CodeSuccess
 }
 
@@ -134,6 +158,7 @@ func CreateStreamSessionAndSendMessage(userName string, userQuestion string, mod
 }
 
 func ChatSend(userName string, sessionID string, userQuestion string, modelType string) (string, code.Code) {
+	modelType = resolveModelType(modelType)
 	manager := aihelper.GetGlobalManager()
 	cfg := map[string]interface{}{
 		"username":  userName,

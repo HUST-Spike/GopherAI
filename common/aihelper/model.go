@@ -3,14 +3,20 @@ package aihelper
 import (
 	mcpconv "GopherAI/common/mcp"
 	mcpclient "GopherAI/common/mcp/client"
+	mcprunner "GopherAI/common/mcp/runner"
+	mcpserver "GopherAI/common/mcp/server"
 	"GopherAI/common/rag"
+	"GopherAI/common/skill"
 	"GopherAI/config"
 	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"os"
+	"sort"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/cloudwego/eino-ext/components/model/ollama"
 	"github.com/cloudwego/eino-ext/components/model/openai"
@@ -19,7 +25,11 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 )
 
-type StreamCallback func(msg string)
+// StreamCallback is the unified callback every streaming model invokes.
+// Backends emit StreamEvent values (see event.go) so the SSE wire format is
+// the single source of truth: token chunks, tool_call markers, tool_result
+// markers, error and done events all share one envelope.
+type StreamCallback func(event StreamEvent)
 
 // AIModel defines the interface all AI model backends must implement.
 type AIModel interface {
@@ -228,8 +238,14 @@ type MCPModel struct {
 	mcpURL    string
 	username  string
 	sessionID string
-	tools     []mcp.Tool
-	mu        sync.Mutex
+	// allTools is the raw set of tools the MCP server exposes (cached after
+	// first ListTools). Filtering happens per-call against active skills.
+	allTools []mcp.Tool
+	// boundSig is a stable signature of the tool-name set currently bound
+	// to toolLLM. Used to skip a redundant WithTools when the visible set
+	// hasn't changed between calls.
+	boundSig string
+	mu       sync.Mutex
 }
 
 func NewMCPModel(ctx context.Context, username string, sessionID string) (*MCPModel, error) {
@@ -259,15 +275,17 @@ func NewMCPModel(ctx context.Context, username string, sessionID string) (*MCPMo
 		sessionID: sessionID,
 	}
 
-	if err := m.discoverAndBindTools(ctx); err != nil {
+	if err := m.refreshAllTools(ctx); err != nil {
 		log.Printf("MCP tool discovery failed (will retry lazily): %v", err)
 	}
 
 	return m, nil
 }
 
-// discoverAndBindTools calls MCP tools/list and binds them to the LLM via WithTools.
-func (m *MCPModel) discoverAndBindTools(ctx context.Context) error {
+// refreshAllTools repopulates m.allTools by calling MCP tools/list. This is
+// the authoritative list of every tool the server exposes, regardless of
+// session-level skill activation. Per-call filtering uses VisibleTools.
+func (m *MCPModel) refreshAllTools(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -275,73 +293,129 @@ func (m *MCPModel) discoverAndBindTools(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("mcp list tools failed: %v", err)
 	}
-
-	m.tools = toolsResult.Tools
-	toolInfos := mcpconv.ConvertToolsToEino(m.tools)
-
-	toolLLM, err := m.baseLLM.WithTools(toolInfos)
-	if err != nil {
-		return fmt.Errorf("bind tools to llm failed: %v", err)
-	}
-	m.toolLLM = toolLLM
-	log.Printf("MCP: discovered and bound %d tools", len(m.tools))
+	m.allTools = toolsResult.Tools
+	m.boundSig = ""
+	m.toolLLM = nil
+	log.Printf("MCP: discovered %d tools", len(m.allTools))
 	return nil
 }
 
-// ensureTools lazily retries tool discovery if the initial attempt failed.
+// ensureTools makes sure toolLLM is bound to exactly the set of tools
+// visible under the session's *current* active skills. It is cheap on the
+// hot path: when the skill set hasn't changed it just returns the cached
+// toolLLM without touching the upstream model.
 func (m *MCPModel) ensureTools(ctx context.Context) model.ToolCallingChatModel {
 	m.mu.Lock()
-	if m.toolLLM != nil {
+	if len(m.allTools) == 0 {
+		m.mu.Unlock()
+		if err := m.refreshAllTools(ctx); err != nil {
+			log.Printf("MCP lazy tool discovery failed: %v", err)
+			return m.baseLLM
+		}
+		m.mu.Lock()
+	}
+
+	activeSkills := skill.GetGlobalSkillManager().GetActiveSkillNames(m.sessionID)
+	visible := mcpserver.DefaultRegistry.VisibleTools(m.allTools, activeSkills)
+	sig := toolsSignature(visible)
+
+	if m.toolLLM != nil && sig == m.boundSig {
 		llm := m.toolLLM
 		m.mu.Unlock()
 		return llm
 	}
 	m.mu.Unlock()
 
-	if err := m.discoverAndBindTools(ctx); err != nil {
-		log.Printf("MCP lazy tool discovery failed: %v", err)
+	toolInfos := mcpconv.ConvertToolsToEino(visible)
+	toolLLM, err := m.baseLLM.WithTools(toolInfos)
+	if err != nil {
+		log.Printf("MCP bind tools failed: %v (falling back to baseLLM)", err)
 		return m.baseLLM
 	}
 
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.toolLLM
+	m.toolLLM = toolLLM
+	m.boundSig = sig
+	m.mu.Unlock()
+	log.Printf("MCP: bound %d/%d tools (active_skills=%v)", len(visible), len(m.allTools), activeSkills)
+	return toolLLM
+}
+
+// toolsSignature builds a stable, order-independent signature from a tool
+// set's names so we can compare two binds without diffing whole structs.
+func toolsSignature(tools []mcp.Tool) string {
+	names := make([]string, len(tools))
+	for i, t := range tools {
+		names[i] = t.Name
+	}
+	sort.Strings(names)
+	return strings.Join(names, "|")
 }
 
 func (m *MCPModel) GenerateResponse(ctx context.Context, messages []*schema.Message) (*schema.Message, error) {
+	return m.generateWithRoundCap(ctx, messages, mcpMaxToolRounds)
+}
+
+// generateWithRoundCap runs the tool-calling loop with an explicit upper
+// bound. SmartModel calls this with maxRounds=1 to enforce single-shot
+// function calling when ENABLE_AGENT_LOOP=false.
+func (m *MCPModel) generateWithRoundCap(ctx context.Context, messages []*schema.Message, maxRounds int) (*schema.Message, error) {
 	if len(messages) == 0 {
 		return nil, fmt.Errorf("no messages provided")
+	}
+	if maxRounds <= 0 {
+		maxRounds = 1
 	}
 
 	llm := m.ensureTools(ctx)
 	conversation := make([]*schema.Message, len(messages))
 	copy(conversation, messages)
 
-	for round := 0; round < mcpMaxToolRounds; round++ {
+	var lastResp *schema.Message
+	for round := 0; round < maxRounds; round++ {
 		resp, err := llm.Generate(ctx, conversation)
 		if err != nil {
 			return nil, fmt.Errorf("mcp generate failed (round %d): %v", round, err)
 		}
+		lastResp = resp
 		if len(resp.ToolCalls) == 0 {
 			return resp, nil
 		}
 		conversation = append(conversation, resp)
-		toolMsgs := m.executeToolCalls(ctx, resp.ToolCalls)
+		toolMsgs := m.executeToolCallsWithCallback(ctx, resp.ToolCalls, nil)
 		conversation = append(conversation, toolMsgs...)
 	}
-	return nil, fmt.Errorf("mcp tool calling exceeded max rounds (%d)", mcpMaxToolRounds)
+	// Round budget exhausted with the LLM still trying to call a tool: hand
+	// back the last assistant message rather than erroring out, so the
+	// caller can still surface partial reasoning. Single-round mode hits
+	// this every time the LLM picks a tool, which is exactly the desired
+	// "single function call, no iteration" behavior.
+	if lastResp != nil {
+		return lastResp, nil
+	}
+	return nil, fmt.Errorf("mcp tool calling exceeded max rounds (%d)", maxRounds)
 }
 
 func (m *MCPModel) StreamResponse(ctx context.Context, messages []*schema.Message, cb StreamCallback) (string, error) {
+	return m.streamWithRoundCap(ctx, messages, cb, mcpMaxToolRounds)
+}
+
+// streamWithRoundCap mirrors generateWithRoundCap for the streaming path.
+// Single-round mode is what SmartModel uses when ENABLE_AGENT_LOOP=false.
+func (m *MCPModel) streamWithRoundCap(ctx context.Context, messages []*schema.Message, cb StreamCallback, maxRounds int) (string, error) {
 	if len(messages) == 0 {
 		return "", fmt.Errorf("no messages provided")
+	}
+	if maxRounds <= 0 {
+		maxRounds = 1
 	}
 
 	llm := m.ensureTools(ctx)
 	conversation := make([]*schema.Message, len(messages))
 	copy(conversation, messages)
 
-	for round := 0; round < mcpMaxToolRounds; round++ {
+	var lastText string
+	for round := 0; round < maxRounds; round++ {
 		stream, err := llm.Stream(ctx, conversation)
 		if err != nil {
 			return "", fmt.Errorf("mcp stream failed (round %d): %v", round, err)
@@ -351,21 +425,16 @@ func (m *MCPModel) StreamResponse(ctx context.Context, messages []*schema.Messag
 		if err != nil {
 			return text, fmt.Errorf("mcp stream recv failed (round %d): %v", round, err)
 		}
+		lastText = text
 		if len(assembled.ToolCalls) == 0 {
 			return text, nil
 		}
 
-		if cb != nil {
-			for _, tc := range assembled.ToolCalls {
-				cb(fmt.Sprintf("\n[调用工具: %s]\n", tc.Function.Name))
-			}
-		}
-
 		conversation = append(conversation, assembled)
-		toolMsgs := m.executeToolCalls(ctx, assembled.ToolCalls)
+		toolMsgs := m.executeToolCallsWithCallback(ctx, assembled.ToolCalls, cb)
 		conversation = append(conversation, toolMsgs...)
 	}
-	return "", fmt.Errorf("mcp tool calling exceeded max rounds (%d)", mcpMaxToolRounds)
+	return lastText, nil
 }
 
 // executeToolCalls calls each tool on the MCP server and returns Tool-role messages.
@@ -374,11 +443,24 @@ func (m *MCPModel) StreamResponse(ctx context.Context, messages []*schema.Messag
 // The caller's ctx is enriched with a ToolCtx so MCP server-side handlers can
 // identify the originating user/session. The trace_id field is left empty
 // here; Step 8 of the overhaul plan wires per-request trace_id end-to-end.
-func (m *MCPModel) executeToolCalls(ctx context.Context, toolCalls []schema.ToolCall) []*schema.Message {
+// executeToolCallsWithCallback runs every tool call the LLM emitted in this
+// round through the runner and surfaces tool_call / tool_result events to
+// cb if one is provided. cb may be nil (non-streaming Generate path); the
+// MySQL-backed tool_invocations ledger is written either way.
+func (m *MCPModel) executeToolCallsWithCallback(
+	ctx context.Context,
+	toolCalls []schema.ToolCall,
+	cb StreamCallback,
+) []*schema.Message {
+	traceID, _ := ctx.Value(traceIDCtxKey{}).(string)
+
 	callCtx := mcpconv.WithToolCtx(ctx, mcpconv.ToolCtx{
 		UserName:  m.username,
 		SessionID: m.sessionID,
+		TraceID:   traceID,
 	})
+
+	activeSkills := skill.GetGlobalSkillManager().GetActiveSkillNames(m.sessionID)
 
 	results := make([]*schema.Message, 0, len(toolCalls))
 	for _, tc := range toolCalls {
@@ -393,21 +475,62 @@ func (m *MCPModel) executeToolCalls(ctx context.Context, toolCalls []schema.Tool
 			}
 		}
 
-		result, err := m.client.CallTool(callCtx, tc.Function.Name, args)
-		if err != nil {
-			results = append(results, &schema.Message{
-				Role: schema.Tool, ToolCallID: tc.ID, ToolName: tc.Function.Name,
-				Content: fmt.Sprintf("tool call failed: %v", err),
-			})
-			continue
+		if cb != nil {
+			cb(ToolCallEvent(tc.Function.Name, tc.ID, tc.Function.Arguments))
+		}
+
+		start := time.Now()
+		res := mcprunner.Run(callCtx, m.client, tc.Function.Name, args, mcprunner.Options{
+			ToolCallID:   tc.ID,
+			TraceID:      traceID,
+			ActiveSkills: activeSkills,
+			ModelType:    m.GetModelType(),
+		})
+		duration := int(time.Since(start).Milliseconds())
+
+		if cb != nil {
+			cb(ToolResultEvent(
+				tc.Function.Name,
+				tc.ID,
+				string(res.Status),
+				summarizeText(res.Text, 200),
+				res.Attempts,
+				duration,
+			))
 		}
 
 		results = append(results, &schema.Message{
 			Role: schema.Tool, ToolCallID: tc.ID, ToolName: tc.Function.Name,
-			Content: mcpconv.ExtractToolResultText(result),
+			Content: res.Text,
 		})
 	}
 	return results
+}
+
+// summarizeText returns a leading slice of s suitable for the SSE preview
+// field. We measure by runes so multi-byte characters aren't truncated mid-
+// codepoint, which would otherwise produce garbage in the browser.
+func summarizeText(s string, max int) string {
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	return string(runes[:max]) + "..."
+}
+
+// traceIDCtxKey is a private type used to carry a per-request trace_id down
+// the call stack without exporting a key string. Step 8 of the plan threads
+// trace_id all the way from the HTTP layer; for now this keeps the runner
+// happy with whatever is on ctx and falls back to "" otherwise.
+type traceIDCtxKey struct{}
+
+// WithTraceID returns ctx tagged with traceID so MCPModel.executeToolCalls
+// can forward it to the runner. Exported for service-layer wiring (Step 8).
+func WithTraceID(ctx context.Context, traceID string) context.Context {
+	if traceID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, traceIDCtxKey{}, traceID)
 }
 
 func (m *MCPModel) GetModelType() string { return "3" }
