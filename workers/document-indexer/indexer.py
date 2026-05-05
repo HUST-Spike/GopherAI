@@ -6,10 +6,9 @@ import os
 import time
 from dataclasses import dataclass
 
-from llama_index.core import Document
-from llama_index.core.node_parser import SentenceSplitter
 from llama_index.embeddings.openai import OpenAIEmbedding
 
+from chunking import ChunkingConfig, nodes_to_chunks, split_text_to_nodes
 from config import WorkerConfig
 from milvus_store import MilvusDocumentChunkStore
 from repository import DocumentRecord
@@ -29,9 +28,15 @@ class RealDocumentIndexer:
         self.config = config
         self.store = store
         self.logger = logger
-        self.splitter = SentenceSplitter(
+        self.chunking_config = ChunkingConfig(
+            strategy=config.chunk_strategy,
             chunk_size=config.chunk_size,
             chunk_overlap=config.chunk_overlap,
+            markdown_max_section_chars=config.markdown_max_section_chars,
+            semantic_breakpoint_percentile_threshold=config.semantic_breakpoint_percentile_threshold,
+            semantic_buffer_size=config.semantic_buffer_size,
+            semantic_fallback_chunk_size=config.semantic_fallback_chunk_size,
+            semantic_fallback_chunk_overlap=config.semantic_fallback_chunk_overlap,
         )
         self.embed_model = OpenAIEmbedding(
             model_name=config.embedding_model,
@@ -48,21 +53,18 @@ class RealDocumentIndexer:
             raise ValueError("EMBEDDING_API_KEY is required when MOCK_INDEX=false")
 
         content = self._read_text_file(doc.file_path)
-        nodes = self.splitter.get_nodes_from_documents(
-            [
-                Document(
-                    text=content,
-                    metadata={
-                        "document_id": doc.id,
-                        "user_name": doc.user_name,
-                        "session_id": doc.session_id,
-                        "source": doc.file_path,
-                    },
-                )
-            ]
+        nodes = split_text_to_nodes(
+            content=content,
+            metadata={
+                "document_id": doc.id,
+                "user_name": doc.user_name,
+                "session_id": doc.session_id,
+                "source": doc.file_path,
+            },
+            config=self.chunking_config,
+            embed_model=self.embed_model,
         )
-        chunks = [node.get_content(metadata_mode="none") for node in nodes]
-        chunks = [chunk for chunk in chunks if chunk.strip()]
+        chunks = nodes_to_chunks(nodes)
         if not chunks:
             raise ValueError("no chunks generated")
 
@@ -118,8 +120,14 @@ class RealDocumentIndexer:
             "mime_type": doc.mime_type,
             "document_sha256": doc.sha256,
             "chunk_sha256": chunk_sha256,
+            "chunk_strategy": self.config.chunk_strategy,
             "chunk_size": self.config.chunk_size,
             "chunk_overlap": self.config.chunk_overlap,
+            "markdown_max_section_chars": self.config.markdown_max_section_chars,
+            "semantic_breakpoint_percentile_threshold": self.config.semantic_breakpoint_percentile_threshold,
+            "semantic_buffer_size": self.config.semantic_buffer_size,
+            "semantic_fallback_chunk_size": self.config.semantic_fallback_chunk_size,
+            "semantic_fallback_chunk_overlap": self.config.semantic_fallback_chunk_overlap,
             "original_filename": doc.original_filename,
             "file_path": doc.file_path,
         }

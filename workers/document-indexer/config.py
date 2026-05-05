@@ -33,8 +33,14 @@ class WorkerConfig:
     milvus_uri: str
     milvus_collection: str
     milvus_insert_batch_size: int
+    chunk_strategy: str
     chunk_size: int
     chunk_overlap: int
+    markdown_max_section_chars: int
+    semantic_breakpoint_percentile_threshold: int
+    semantic_buffer_size: int
+    semantic_fallback_chunk_size: int
+    semantic_fallback_chunk_overlap: int
     index_max_attempts: int
     index_retry_delays: Tuple[int, ...]
 
@@ -69,8 +75,14 @@ def load_config() -> WorkerConfig:
         milvus_uri=os.getenv("MILVUS_URI", "http://127.0.0.1:19530"),
         milvus_collection=os.getenv("MILVUS_COLLECTION", "gopherai_document_chunks_v1"),
         milvus_insert_batch_size=int(os.getenv("MILVUS_INSERT_BATCH_SIZE", "64")),
+        chunk_strategy=os.getenv("CHUNK_STRATEGY", "sentence_splitter"),
         chunk_size=int(os.getenv("CHUNK_SIZE", "1000")),
         chunk_overlap=int(os.getenv("CHUNK_OVERLAP", "150")),
+        markdown_max_section_chars=int(os.getenv("MARKDOWN_MAX_SECTION_CHARS", "1600")),
+        semantic_breakpoint_percentile_threshold=int(os.getenv("SEMANTIC_BREAKPOINT_PERCENTILE_THRESHOLD", "95")),
+        semantic_buffer_size=int(os.getenv("SEMANTIC_BUFFER_SIZE", "1")),
+        semantic_fallback_chunk_size=int(os.getenv("SEMANTIC_FALLBACK_CHUNK_SIZE", "1000")),
+        semantic_fallback_chunk_overlap=int(os.getenv("SEMANTIC_FALLBACK_CHUNK_OVERLAP", "150")),
         index_max_attempts=int(os.getenv("INDEX_MAX_ATTEMPTS", "3")),
         index_retry_delays=_parse_retry_delays(os.getenv("INDEX_RETRY_DELAYS", "2,5")),
     )
