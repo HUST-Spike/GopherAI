@@ -91,7 +91,7 @@ func handleRunPython(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToo
 	runCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(runCtx, pyBin, "-I", scriptPath)
+	cmd := exec.CommandContext(runCtx, pyBin, "-I", "-X", "utf8", scriptPath)
 	cmd.Dir = workDir
 	cmd.Env = minimalEnv()
 
@@ -151,10 +151,23 @@ func resolvePythonBinary() (string, error) {
 	}
 	for _, name := range []string{"python3", "python"} {
 		if path, err := exec.LookPath(name); err == nil {
-			return path, nil
+			if isUsablePythonBinary(path) {
+				return path, nil
+			}
 		}
 	}
 	return "", fmt.Errorf("python interpreter not found (set PYTHON_BIN or install python3)")
+}
+
+func isUsablePythonBinary(path string) bool {
+	if runtime.GOOS != "windows" {
+		return true
+	}
+	// WindowsApps contains Microsoft Store launcher stubs that often exit
+	// with code 9009 when Python is not actually installed. Avoid selecting
+	// that shim during auto-discovery; PYTHON_BIN can still explicitly point
+	// at any real interpreter.
+	return !strings.Contains(strings.ToLower(path), `\windowsapps\`)
 }
 
 // minimalEnv strips inherited environment to the bare minimum the interpreter

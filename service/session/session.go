@@ -3,12 +3,17 @@ package session
 import (
 	"GopherAI/common/aihelper"
 	"GopherAI/common/code"
+	"GopherAI/common/skill"
 	"GopherAI/config"
+	messagedao "GopherAI/dao/message"
 	"GopherAI/dao/session"
 	"GopherAI/model"
 	"context"
 	"log"
 	"net/http"
+	"sort"
+	"strings"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -28,25 +33,119 @@ func resolveModelType(modelType string) string {
 }
 
 func GetUserSessionsByUserName(userName string) ([]model.SessionInfo, error) {
-	manager := aihelper.GetGlobalManager()
-	sessions := manager.GetUserSessions(userName)
+	dbSessions, err := session.GetSessionsByUserName(userName)
+	if err != nil {
+		return nil, err
+	}
 
-	var infos []model.SessionInfo
-	for _, s := range sessions {
+	sessionIDs := make([]string, 0, len(dbSessions))
+	for _, s := range dbSessions {
+		sessionIDs = append(sessionIDs, s.ID)
+	}
+
+	firstUserMessage := make(map[string]string, len(dbSessions))
+	lastActivity := make(map[string]time.Time, len(dbSessions))
+	if messages, err := messagedao.GetMessagesBySessionIDs(sessionIDs); err == nil {
+		for _, msg := range messages {
+			if msg.IsUser && firstUserMessage[msg.SessionID] == "" {
+				firstUserMessage[msg.SessionID] = msg.Content
+			}
+			if msg.CreatedAt.After(lastActivity[msg.SessionID]) {
+				lastActivity[msg.SessionID] = msg.CreatedAt
+			}
+		}
+	} else {
+		log.Println("GetUserSessionsByUserName GetMessagesBySessionIDs error:", err)
+	}
+
+	activityAt := func(s model.Session) time.Time {
+		if t := lastActivity[s.ID]; !t.IsZero() {
+			return t
+		}
+		if !s.UpdatedAt.IsZero() {
+			return s.UpdatedAt
+		}
+		return s.CreatedAt
+	}
+
+	sort.SliceStable(dbSessions, func(i, j int) bool {
+		return activityAt(dbSessions[i]).After(activityAt(dbSessions[j]))
+	})
+
+	infos := make([]model.SessionInfo, 0, len(dbSessions))
+	for _, s := range dbSessions {
+		titleSource := s.Title
+		if strings.TrimSpace(titleSource) == "" || titleSource == s.ID {
+			titleSource = firstUserMessage[s.ID]
+		}
 		infos = append(infos, model.SessionInfo{
-			SessionID: s,
-			Title:     s,
+			SessionID: s.ID,
+			Title:     makeSessionTitle(titleSource),
+			UpdatedAt: activityAt(s),
 		})
 	}
 	return infos, nil
 }
 
-func CreateSessionAndSendMessage(userName string, userQuestion string, modelType string) (string, string, code.Code) {
+func makeSessionTitle(content string) string {
+	const maxRunes = 32
+	title := strings.Join(strings.Fields(content), " ")
+	title = strings.Trim(title, " \t\r\n#*_`-")
+	if title == "" {
+		return "新会话"
+	}
+	runes := []rune(title)
+	if len(runes) <= maxRunes {
+		return title
+	}
+	return string(runes[:maxRunes]) + "..."
+}
+
+func activateInitialSkills(sessionID string, activeSkills []string) {
+	if len(activeSkills) == 0 {
+		return
+	}
+	sm := skill.GetGlobalSkillManager()
+	seen := make(map[string]struct{}, len(activeSkills))
+	for _, name := range activeSkills {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		if err := sm.Activate(sessionID, name); err != nil {
+			log.Printf("activate initial skill %q for session %s failed: %v", name, sessionID, err)
+		}
+	}
+}
+
+func hydrateHelperFromDB(userName, sessionID string, helper *aihelper.AIHelper) {
+	if helper == nil || len(helper.GetMessages()) > 0 {
+		return
+	}
+	messages, err := messagedao.GetMessagesBySessionID(sessionID)
+	if err != nil {
+		log.Println("hydrateHelperFromDB GetMessagesBySessionID error:", err)
+		return
+	}
+	for _, msg := range messages {
+		msgUserName := msg.UserName
+		if msgUserName == "" {
+			msgUserName = userName
+		}
+		helper.AddMessageWithRole(msg.Content, msgUserName, msg.GetRole(), false)
+	}
+}
+
+func CreateSessionAndSendMessage(userName string, userQuestion string, modelType string, activeSkills []string) (string, string, code.Code) {
 	modelType = resolveModelType(modelType)
 	newSession := &model.Session{
 		ID:        uuid.New().String(),
 		UserName:  userName,
-		Title:     userQuestion,
+		Title:     makeSessionTitle(userQuestion),
 		ModelType: modelType,
 	}
 	createdSession, err := session.CreateSession(newSession)
@@ -54,6 +153,7 @@ func CreateSessionAndSendMessage(userName string, userQuestion string, modelType
 		log.Println("CreateSessionAndSendMessage CreateSession error:", err)
 		return "", "", code.CodeServerBusy
 	}
+	activateInitialSkills(createdSession.ID, activeSkills)
 
 	manager := aihelper.GetGlobalManager()
 	cfg := map[string]interface{}{
@@ -65,6 +165,7 @@ func CreateSessionAndSendMessage(userName string, userQuestion string, modelType
 		log.Println("CreateSessionAndSendMessage GetOrCreateAIHelper error:", err)
 		return "", "", code.AIModelFail
 	}
+	hydrateHelperFromDB(userName, createdSession.ID, helper)
 
 	ctx := context.Background()
 	aiResponse, err := helper.GenerateResponse(userName, ctx, userQuestion)
@@ -76,12 +177,12 @@ func CreateSessionAndSendMessage(userName string, userQuestion string, modelType
 	return createdSession.ID, aiResponse.Content, code.CodeSuccess
 }
 
-func CreateStreamSessionOnly(userName string, userQuestion string, modelType string) (string, code.Code) {
+func CreateStreamSessionOnly(userName string, userQuestion string, modelType string, activeSkills []string) (string, code.Code) {
 	modelType = resolveModelType(modelType)
 	newSession := &model.Session{
 		ID:        uuid.New().String(),
 		UserName:  userName,
-		Title:     userQuestion,
+		Title:     makeSessionTitle(userQuestion),
 		ModelType: modelType,
 	}
 	createdSession, err := session.CreateSession(newSession)
@@ -89,6 +190,7 @@ func CreateStreamSessionOnly(userName string, userQuestion string, modelType str
 		log.Println("CreateStreamSessionOnly CreateSession error:", err)
 		return "", code.CodeServerBusy
 	}
+	activateInitialSkills(createdSession.ID, activeSkills)
 	return createdSession.ID, code.CodeSuccess
 }
 
@@ -110,6 +212,7 @@ func StreamMessageToExistingSession(userName string, sessionID string, userQuest
 		log.Println("StreamMessageToExistingSession GetOrCreateAIHelper error:", err)
 		return code.AIModelFail
 	}
+	hydrateHelperFromDB(userName, sessionID, helper)
 
 	traceID := uuid.New().String()
 	writeEvt := func(evt aihelper.StreamEvent) {
@@ -144,7 +247,7 @@ func StreamMessageToExistingSession(userName string, sessionID string, userQuest
 }
 
 func CreateStreamSessionAndSendMessage(userName string, userQuestion string, modelType string, writer http.ResponseWriter) (string, code.Code) {
-	sessionID, c := CreateStreamSessionOnly(userName, userQuestion, modelType)
+	sessionID, c := CreateStreamSessionOnly(userName, userQuestion, modelType, nil)
 	if c != code.CodeSuccess {
 		return "", c
 	}
@@ -169,6 +272,7 @@ func ChatSend(userName string, sessionID string, userQuestion string, modelType 
 		log.Println("ChatSend GetOrCreateAIHelper error:", err)
 		return "", code.AIModelFail
 	}
+	hydrateHelperFromDB(userName, sessionID, helper)
 
 	ctx := context.Background()
 	aiResponse, err := helper.GenerateResponse(userName, ctx, userQuestion)
@@ -181,15 +285,41 @@ func ChatSend(userName string, sessionID string, userQuestion string, modelType 
 }
 
 func GetChatHistory(userName string, sessionID string) ([]model.History, code.Code) {
+	dbSession, err := session.GetSessionByID(sessionID)
+	if err != nil {
+		log.Println("GetChatHistory GetSessionByID error:", err)
+		return nil, code.CodeRecordNotFound
+	}
+	if dbSession.UserName != userName {
+		return nil, code.CodeForbidden
+	}
+
+	dbMessages, err := messagedao.GetMessagesBySessionID(sessionID)
+	if err == nil && len(dbMessages) > 0 {
+		history := make([]model.History, 0, len(dbMessages))
+		for _, msg := range dbMessages {
+			history = append(history, model.History{
+				IsUser:   msg.IsUser,
+				Role:     msg.GetRole(),
+				Content:  msg.Content,
+				ToolName: msg.ToolName,
+			})
+		}
+		return history, code.CodeSuccess
+	}
+	if err != nil {
+		log.Println("GetChatHistory GetMessagesBySessionID error:", err)
+	}
+
 	manager := aihelper.GetGlobalManager()
 	helper, exists := manager.GetAIHelper(userName, sessionID)
 	if !exists {
-		return nil, code.CodeServerBusy
+		return []model.History{}, code.CodeSuccess
 	}
 
-	messages := helper.GetMessages()
-	history := make([]model.History, 0, len(messages))
-	for _, msg := range messages {
+	helperMessages := helper.GetMessages()
+	history := make([]model.History, 0, len(helperMessages))
+	for _, msg := range helperMessages {
 		history = append(history, model.History{
 			IsUser:  msg.IsUser,
 			Role:    msg.GetRole(),

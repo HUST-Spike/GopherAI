@@ -22,6 +22,9 @@ type (
 		// Legacy clients that still pass "1"/"2"/"3"/"4" continue to work
 		// unchanged so smoke tests against earlier behavior are not broken.
 		ModelType string `json:"modelType"`
+		// Optional initial skills for a newly-created session. This lets the
+		// frontend enable a selected skill before the first model turn runs.
+		ActiveSkills []string `json:"activeSkills"`
 	}
 
 	CreateSessionAndSendMessageResponse struct {
@@ -74,7 +77,7 @@ func CreateSessionAndSendMessage(c *gin.Context) {
 		return
 	}
 	//内部会创建会话并发送消息，并会将AI回答、当前会话返回
-	session_id, aiInformation, code_ := session.CreateSessionAndSendMessage(userName, req.UserQuestion, req.ModelType)
+	session_id, aiInformation, code_ := session.CreateSessionAndSendMessage(userName, req.UserQuestion, req.ModelType, req.ActiveSkills)
 
 	if code_ != code.CodeSuccess {
 		c.JSON(http.StatusOK, res.CodeOf(code_))
@@ -104,7 +107,7 @@ func CreateStreamSessionAndSendMessage(c *gin.Context) {
 
 	// 先创建会话；session 事件由 service 层在流的第一帧统一发出，那里同时
 	// 携带 trace_id，避免前端拿到两份不同 schema 的开场事件。
-	sessionID, code_ := session.CreateStreamSessionOnly(userName, req.UserQuestion, req.ModelType)
+	sessionID, code_ := session.CreateStreamSessionOnly(userName, req.UserQuestion, req.ModelType, req.ActiveSkills)
 	if code_ != code.CodeSuccess {
 		c.SSEvent("error", gin.H{"message": "Failed to create session"})
 		return
@@ -151,7 +154,6 @@ func ChatStreamSend(c *gin.Context) {
 	c.Header("Connection", "keep-alive")
 	c.Header("Access-Control-Allow-Origin", "*")
 	c.Header("X-Accel-Buffering", "no") // 禁止代理缓存
-
 
 	code_ := session.ChatStreamSend(userName, req.SessionID, req.UserQuestion, req.ModelType, http.ResponseWriter(c.Writer))
 	if code_ != code.CodeSuccess {

@@ -26,18 +26,21 @@
 
         <!-- Skill 多选：激活后才能让 AI 看到对应的专属工具（如 run_python） -->
         <div class="skills-picker" v-if="skills.length">
-          <span class="skills-label">技能：</span>
-          <button
-            v-for="s in skills"
-            :key="s.name"
-            type="button"
-            class="skill-chip"
-            :class="{ active: activeSkills.includes(s.name) }"
-            :title="s.description"
-            @click="toggleSkill(s.name)"
+          <span class="skills-label">Skills</span>
+          <select
+            class="skills-select"
+            :value="selectedSkill"
+            @change="setSelectedSkill($event.target.value)"
           >
-            {{ skillLabel(s.name) }}
-          </button>
+            <option value="">None</option>
+            <option
+              v-for="s in skills"
+              :key="s.name"
+              :value="s.name"
+            >
+              {{ skillLabel(s.name) }}
+            </option>
+          </select>
         </div>
 
         <label for="streamingMode" style="margin-left: 8px;">
@@ -148,6 +151,14 @@ export default {
     // refreshed whenever the user switches sessions.
     const skills = ref([])
     const activeSkills = ref([])
+    const selectedSkill = computed(() => activeSkills.value[0] || '')
+    const orderedSessions = computed(() => {
+      return Object.values(sessions.value).sort((a, b) => {
+        const aTime = a.updatedAt ? (Date.parse(a.updatedAt) || 0) : 0
+        const bTime = b.updatedAt ? (Date.parse(b.updatedAt) || 0) : 0
+        return bTime - aTime
+      })
+    })
 
 
     const escapeHtml = (value) => String(value)
@@ -157,10 +168,52 @@ export default {
       .replace(/"/g, '&quot;')
       .replace(/'/g, '&#39;')
 
-    const renderInlineMarkdown = (value) => escapeHtml(value)
-      .replace(/`([^`]+)`/g, '<code>$1</code>')
-      .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-      .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+    const makeSessionName = (value) => {
+      const title = String(value || '').replace(/\s+/g, ' ').trim()
+      if (!title) return '新会话'
+      return title.length > 32 ? `${title.slice(0, 32)}...` : title
+    }
+
+    const renderMathExpression = (value) => {
+      const renderPlain = (expr) => escapeHtml(expr)
+        .replace(/\\times/g, '&times;')
+        .replace(/\\div/g, '&divide;')
+        .replace(/\\cdot/g, '&middot;')
+        .replace(/\\left/g, '')
+        .replace(/\\right/g, '')
+
+      const fractions = []
+      const tokenized = String(value).trim().replace(/\\frac\{([^{}]+)\}\{([^{}]+)\}/g, (_, top, bottom) => {
+        const token = `@@FRAC_${fractions.length}@@`
+        fractions.push(`<span class="math-frac"><span>${renderPlain(top)}</span><span>${renderPlain(bottom)}</span></span>`)
+        return token
+      })
+      let expr = renderPlain(tokenized)
+      fractions.forEach((fraction, index) => {
+        expr = expr.replace(`@@FRAC_${index}@@`, fraction)
+      })
+      return `<span class="math-inline">${expr}</span>`
+    }
+
+    const renderInlineMarkdown = (value) => {
+      const source = String(value)
+      const mathChunks = []
+      const tokenized = source.replace(/\\\((.+?)\\\)/g, (_, expr) => {
+        const token = `@@MATH_${mathChunks.length}@@`
+        mathChunks.push(renderMathExpression(expr))
+        return token
+      })
+
+      let html = escapeHtml(tokenized)
+        .replace(/`([^`]+)`/g, '<code>$1</code>')
+        .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
+        .replace(/\*([^*]+)\*/g, '<em>$1</em>')
+
+      mathChunks.forEach((chunk, index) => {
+        html = html.replace(`@@MATH_${index}@@`, chunk)
+      })
+      return html
+    }
 
     const renderMarkdown = (text) => {
       if (!text && text !== '') return ''
@@ -322,6 +375,7 @@ export default {
             sessionMap[sid] = {
               id: sid,
               name: s.name || `会话 ${sid}`,
+              updatedAt: s.updatedAt || '',
               messages: [] // lazy load
             }
           })
@@ -417,6 +471,9 @@ export default {
 
 
       currentMessages.value.push(userMessage)
+      if (!tempSession.value && currentSessionId.value && sessions.value[currentSessionId.value]) {
+        sessions.value[currentSessionId.value].updatedAt = new Date().toISOString()
+      }
       await nextTick()
       scrollToBottom()
 
@@ -489,7 +546,7 @@ export default {
       // configured default (modelType=5/SmartModel). Legacy values can still
       // be set manually for smoke testing.
       const body = tempSession.value
-        ? { question }
+        ? { question, activeSkills: activeSkills.value.filter(Boolean).slice(0, 1) }
         : { question, sessionId: currentSessionId.value }
 
       const dispatchEvent = (evt) => {
@@ -501,7 +558,8 @@ export default {
               if (tempSession.value) {
                 sessions.value[newSid] = {
                   id: newSid,
-                  name: '新会话',
+                  name: makeSessionName(question),
+                  updatedAt: new Date().toISOString(),
                   messages: [...currentMessages.value]
                 }
                 currentSessionId.value = newSid
@@ -522,18 +580,27 @@ export default {
             break
 
           case 'tool_call': {
-            // Insert a placeholder card; tool_result will fill it in.
-            const card = {
-              tool: evt.tool || '',
-              callId: evt.call_id || '',
-              args: evt.args || '',
-              preview: '',
-              status: 'pending',
-              attempts: 0,
-              durationMs: 0,
-              expanded: false
+            const cards = currentMessages.value[aiMessageIndex].toolCalls
+            const existing = [...cards].reverse().find(c => c.tool === evt.tool && c.status !== 'success')
+            if (existing) {
+              existing.callId = evt.call_id || existing.callId
+              existing.args = evt.args || existing.args
+              existing.preview = ''
+              existing.status = 'pending'
+              existing.attempts = 0
+              existing.durationMs = 0
+            } else {
+              cards.push({
+                tool: evt.tool || '',
+                callId: evt.call_id || '',
+                args: evt.args || '',
+                preview: '',
+                status: 'pending',
+                attempts: 0,
+                durationMs: 0,
+                expanded: false
+              })
             }
-            currentMessages.value[aiMessageIndex].toolCalls.push(card)
             break
           }
 
@@ -693,13 +760,17 @@ export default {
       // Non-streaming fallback. modelType is omitted so the server picks
       // its configured default (modelType=5/SmartModel).
       if (tempSession.value) {
-        const response = await api.post('/AI/chat/send-new-session', { question })
+        const response = await api.post('/AI/chat/send-new-session', {
+          question,
+          activeSkills: activeSkills.value.filter(Boolean).slice(0, 1)
+        })
         if (response.data && response.data.status_code === 1000) {
           const sessionId = String(response.data.sessionId)
           const aiMessage = { role: 'assistant', content: response.data.Information || '' }
           sessions.value[sessionId] = {
             id: sessionId,
-            name: '新会话',
+            name: makeSessionName(question),
+            updatedAt: new Date().toISOString(),
             messages: [{ role: 'user', content: question }, aiMessage]
           }
           currentSessionId.value = sessionId
@@ -721,6 +792,7 @@ export default {
         if (response.data && response.data.status_code === 1000) {
           const aiMessage = { role: 'assistant', content: response.data.Information || '' }
           sessionMsgs.push(aiMessage)
+          sessions.value[currentSessionId.value].updatedAt = new Date().toISOString()
           currentMessages.value = [...sessionMsgs]
         } else {
           ElMessage.error(response.data?.status_msg || '发送失败')
@@ -775,36 +847,46 @@ export default {
       }
     }
 
-    const toggleSkill = async (skillName) => {
-      // Skills are session-scoped on the server. If the user toggled before
-      // a real session exists, queue the toggle locally and apply once the
-      // first message creates the session.
+    const postSkillChange = async (path, sessionId, skillName) => {
+      const response = await api.post(path, { sessionId, skillName })
+      if (!response.data || response.data.status_code !== 1000) {
+        throw new Error(response.data?.status_msg || 'Skill switch failed')
+      }
+    }
+
+    const setSelectedSkill = async (skillName) => {
+      const nextSkill = skillName || ''
+      const previousSkills = [...activeSkills.value]
+
+      // Queue the selection locally until the first message creates a real
+      // session. The selected skill is also sent in the new-session request so
+      // it is active before the model sees the first turn.
       if (!currentSessionId.value || currentSessionId.value === 'temp' || tempSession.value) {
-        if (activeSkills.value.includes(skillName)) {
-          activeSkills.value = activeSkills.value.filter(n => n !== skillName)
-        } else {
-          activeSkills.value = [...activeSkills.value, skillName]
-        }
-        ElMessage.info('技能将在新会话开始后生效')
+        activeSkills.value = nextSkill ? [nextSkill] : []
+        ElMessage.info(nextSkill ? 'Skill will apply to the new session' : 'Skills disabled')
         return
       }
-      const isActive = activeSkills.value.includes(skillName)
-      const path = isActive ? '/AI/skills/deactivate' : '/AI/skills/activate'
+
+      activeSkills.value = nextSkill ? [nextSkill] : []
       try {
-        const response = await api.post(path, { sessionId: currentSessionId.value, skillName })
-        if (response.data && response.data.status_code === 1000) {
-          if (isActive) {
-            activeSkills.value = activeSkills.value.filter(n => n !== skillName)
-          } else {
-            activeSkills.value = [...activeSkills.value, skillName]
-          }
-        } else {
-          ElMessage.error(response.data?.status_msg || '技能切换失败')
+        const sessionId = currentSessionId.value
+        const toDeactivate = previousSkills.filter(name => name && name !== nextSkill)
+        for (const name of toDeactivate) {
+          await postSkillChange('/AI/skills/deactivate', sessionId, name)
+        }
+        if (nextSkill && !previousSkills.includes(nextSkill)) {
+          await postSkillChange('/AI/skills/activate', sessionId, nextSkill)
         }
       } catch (err) {
-        console.error('Toggle skill error:', err)
-        ElMessage.error('技能切换失败')
+        console.error('Set skill error:', err)
+        activeSkills.value = previousSkills
+        ElMessage.error('Skill switch failed')
+        refreshActiveSkills(currentSessionId.value)
       }
+    }
+
+    const toggleSkill = async (skillName) => {
+      await setSelectedSkill(selectedSkill.value === skillName ? '' : skillName)
     }
 
     const skillLabel = (name) => {
@@ -910,7 +992,7 @@ export default {
     })
 
     return {
-      sessions: computed(() => Object.values(sessions.value)),
+      sessions: orderedSessions,
       currentSessionId,
       tempSession,
       currentMessages,
@@ -923,6 +1005,7 @@ export default {
       fileInput,
       skills,
       activeSkills,
+      selectedSkill,
       renderMarkdown,
       playTTS,
       createNewSession,
@@ -932,6 +1015,7 @@ export default {
       triggerFileUpload,
       handleFileUpload,
       handleLogout,
+      setSelectedSkill,
       toggleSkill,
       skillLabel,
       statusEmoji,
@@ -1136,8 +1220,7 @@ export default {
 .skills-picker {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 6px;
+  gap: 8px;
   margin-left: 8px;
 }
 
@@ -1147,27 +1230,23 @@ export default {
   font-size: 13px;
 }
 
-.skill-chip {
-  padding: 5px 12px;
-  border-radius: 999px;
-  border: 1px solid rgba(102, 126, 234, 0.4);
-  background: rgba(255, 255, 255, 0.85);
-  color: #4a5568;
-  font-size: 12px;
+.skills-select {
+  min-width: 132px;
+  height: 32px;
+  padding: 0 30px 0 10px;
+  border: 1px solid rgba(102, 126, 234, 0.32);
+  border-radius: 8px;
+  background: white;
+  color: #2c3e50;
+  font-size: 13px;
   font-weight: 600;
   cursor: pointer;
-  transition: all 0.18s ease;
+  outline: none;
 }
 
-.skill-chip:hover {
-  background: rgba(102, 126, 234, 0.1);
-}
-
-.skill-chip.active {
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-  border-color: transparent;
-  color: white;
-  box-shadow: 0 2px 10px rgba(102, 126, 234, 0.35);
+.skills-select:focus {
+  border-color: rgba(102, 126, 234, 0.72);
+  box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.14);
 }
 
 /* Tool call cards rendered inline below an AI message. They are styled to
@@ -1415,6 +1494,31 @@ export default {
 
 .message-content :deep(li) {
   margin: 4px 0;
+}
+
+.message-content :deep(.math-inline) {
+  display: inline;
+  font-family: "Times New Roman", "Cambria Math", serif;
+  white-space: nowrap;
+}
+
+.message-content :deep(.math-frac) {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  vertical-align: middle;
+  margin: 0 2px;
+  font-size: 0.92em;
+  line-height: 1.05;
+}
+
+.message-content :deep(.math-frac span:first-child) {
+  border-bottom: 1px solid currentColor;
+  padding: 0 3px 1px;
+}
+
+.message-content :deep(.math-frac span:last-child) {
+  padding: 1px 3px 0;
 }
 
 .message-content :deep(code) {
