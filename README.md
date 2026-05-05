@@ -1,169 +1,176 @@
 # GopherAI
 
-GopherAI 是一个以 Go 后端为主体、Vue 前端为交互入口、Python Worker 承担文档索引任务的学习型 AI 项目。当前已经跑通端到端 RAG 主链路：
+GopherAI 是一个面向学习和原型验证的智能问答系统。项目以 Go 后端为主，Vue 提供聊天与文件上传界面，Python Worker 负责异步文档索引，Milvus 承担向量 / BM25 检索。当前已经跑通“上传文档 -> 建索引 -> 会话内检索 -> 工具增强聊天”的完整链路。
+
+## 当前能力
+
+- 用户注册、登录、会话管理和聊天历史。
+- 会话级文档上传，文档只在当前用户和当前会话内可检索。
+- 异步 RAG 索引链路：Go 上传文件，RabbitMQ 派发任务，Python Worker 切分、向量化并写入 Milvus。
+- 统一聊天入口：SmartModel 根据问题自动决定是否调用工具、检索文档或执行技能。
+- 前端支持流式回答、Markdown 渲染、工具调用卡片、Skills 下拉选择。
+- 已建立 RAG 检索评估脚本和实验记录，可重复对比切分、RRF、rerank 等策略。
+
+## 架构设计
+
+核心链路如下：
 
 ```text
-文件上传
--> 本地落盘
--> MySQL 留档
--> RabbitMQ 异步消息
--> Python Worker
+Vue 前端
+-> Go API
+-> MySQL / Redis / RabbitMQ
+-> Python document-indexer
 -> LlamaIndex 切分
 -> Embedding
--> Milvus 写入
--> Go 侧 Milvus 检索
--> 聊天 LLM 基于参考资料回答
+-> Milvus 向量库
+-> Go SmartModel / RAG Retriever
+-> LLM 回答
 ```
 
-当前阶段重点已经从“链路打通”进入“可观测、可测试、切分策略和召回效果优化”。
+文档处理采用异步设计：
 
-## 全能聊天模式（modelType=5）
+```text
+上传文件
+-> 本地 uploads 落盘
+-> MySQL documents / document_index_jobs 留痕
+-> RabbitMQ document.uploaded
+-> Python Worker 消费
+-> LlamaIndex 切分
+-> 智谱 embedding-3 向量化
+-> Milvus 写入 dense vector + BM25 sparse vector
+```
 
-前端只暴露一种「全能聊天」入口（`/ai-chat`）：用户提问后，由 SmartModel 决定要不要调用工具、调用哪些工具，
-并把整个过程通过结构化 SSE 事件推到前端，渲染为可折叠的工具卡片（args / preview / 状态 / 耗时 / 重试次数）。
+检索时严格使用：
 
-- **工具集**：15 个全局工具（时间、计算器、IP 信息、GitHub、PyPI、NPM、汇率、词典、抓网页、RAG、文档列表、Tavily 搜索等）
-  + 1 个 Skill 专属工具（`run_python`，仅在 `code_assistant` 或 `data_analyst` 激活时可见）。
-- **可观测性**：每次工具调用按 attempt 维度落库到 `tool_invocations`，`trace_id` 在 SSE 头帧与日志全程贯通。
-- **可治理性**：`ENABLE_TOOLS` / `ENABLE_SKILLS` / `ENABLE_AGENT_LOOP` 三个环境变量可分别关闭工具绑定、技能 prompt 注入、多轮 agent 循环，
-  无需重启即可逐项 A/B 验证。
+```text
+user_name + session_id
+```
 
-详细 demo 流程见 `test/manual/tool-use-smoke.md`，重构设计文档见 `doc/mcp-tool-overhaul-plan.md`。
+作为过滤条件，避免跨用户、跨会话召回。
 
 ## 技术栈
 
-### 前端
+**前端**
 
 - Vue 3
 - Vue Router
 - Element Plus
 - Axios
-- Vue CLI dev server
 
-前端目录：
+**Go 后端**
 
-```text
-vue-frontend/
-```
+- Gin
+- GORM
+- MySQL
+- Redis
+- RabbitMQ
+- Milvus Go SDK
+- Eino / OpenAI-compatible LLM 调用
+- JWT 鉴权
 
-开发环境中，前端运行在 `http://localhost:8080`，并通过 `vue.config.js` 将 `/api` 代理到 Go 后端：
-
-```text
-/api -> http://localhost:9090/api/v1
-```
-
-### Go 后端
-
-- Go 1.24
-- Gin：HTTP API
-- GORM：MySQL ORM
-- MySQL 8：用户、会话、文档、索引任务等结构化数据
-- Redis：验证码等基础能力
-- RabbitMQ：文件上传后的异步索引事件
-- Milvus Go SDK：聊天时直接检索向量库
-- Eino / OpenAI-compatible SDK：LLM 调用与 Agent / Skill 能力基础设施
-- JWT：用户鉴权
-
-### Python 文档索引 Worker
+**Python Worker**
 
 - Python 3.11
-- pika：消费 RabbitMQ 消息
-- SQLAlchemy + PyMySQL：读写 MySQL
-- LlamaIndex：文档切分与 embedding 调用
-- PyMilvus：写入 Milvus collection
-- python-dotenv：本地 `.env` 配置
+- LlamaIndex
+- PyMilvus
+- SQLAlchemy + PyMySQL
+- pika
 
-### 本地基础设施
+**本地基础设施**
 
-通过 `deploy/docker-compose.yml` 启动：
+- MySQL
+- Redis
+- RabbitMQ
+- Milvus standalone
+- Attu
 
-- MySQL：`4306 -> 3306`
-- Redis：`6379`
-- RabbitMQ Management：`5672` / `15672`
-- Milvus standalone：`19530` / `9091`
-- Attu：Milvus Web GUI，`8000 -> 3000`
+基础设施通过 `deploy/docker-compose.yml` 启动。
 
-## LLM 与 Embedding
+## LLM 应用策略
 
-当前项目把聊天模型和文档向量化模型分开处理：
+当前项目不是简单聊天壳，而是把 RAG、工具调用和技能能力统一到一个 SmartModel 聊天入口中。
 
-- Go 聊天模型：当前配置使用 DeepSeek 的 OpenAI-compatible 接口，配置项在 `config/config.toml`。
-- Python 文档 embedding：当前使用智谱 OpenAI-compatible embedding 接口，模型为 `embedding-3`，向量维度为 `1024`。
-- Go RAG query embedding：复用同一套智谱 embedding 配置，保证查询向量和入库向量同源。
-- Milvus 向量检索：`COSINE` 距离，HNSW 索引。
-- 当前基础切分参数：`CHUNK_SIZE=800`，`CHUNK_OVERLAP=120`。
+### RAG 切分策略
 
-真实 API Key 不提交到仓库。开发期 embedding 相关配置放在：
+经过评测后，当前采用 Markdown-aware 切分：
 
-```text
-workers/document-indexer/.env
+```env
+CHUNK_STRATEGY=markdown_sentence_splitter
+CHUNK_SIZE=1000
+CHUNK_OVERLAP=150
+MARKDOWN_MAX_SECTION_CHARS=1600
 ```
 
-Go 启动时会加载 `config/.env` 和 `workers/document-indexer/.env`，因此 Go RAG 检索可以复用 Python Worker 的 embedding 配置。
+选择原因：它在当前测试语料中比纯 sentence splitter 和 semantic splitter 更稳定，能更好保留 Markdown 文档的章节边界。
 
-## 文档上传与索引流程
+### 检索增强策略
 
-用户上传文档后，Go 后端会：
-
-1. 将文件保存到 `uploads/<username>/<document_id>.<ext>`。
-2. 写入 `documents` 表。
-3. 写入 `document_index_jobs` 表。
-4. 发送 RabbitMQ 消息。
-
-MQ 配置：
+当前生产式检索链路可以开启：
 
 ```text
-exchange: gopherai.document
-queue: gopherai.document.index
-routing_key: document.uploaded
+dense top50 + BM25 top50
+-> RRF 融合
+-> 智谱 rerank
+-> final top5 注入上下文
 ```
 
-Python Worker 收到消息后会：
+关键配置包括：
 
-1. 从 MySQL 读取文档记录。
-2. 将文档状态更新为 `indexing`。
-3. 读取本地 `.md` / `.txt` 文件。
-4. 使用 LlamaIndex 切分 chunk。
-5. 调用 embedding API 生成向量。
-6. 写入 Milvus collection：`gopherai_document_chunks_v1`。
-7. 成功后更新为 `indexed`，失败则更新为 `index_failed`。
+```env
+RAG_FUSION_ENABLED=true
+RAG_FUSION_STRATEGY=rrf
+RAG_RERANK_ENABLED=true
+RAG_RERANK_PROVIDER=zhipu
+RAG_RERANK_SCORE_MODE=rerank_only
+```
 
-Milvus chunk 会带上 `user_name` 和 `session_id`，RAG 检索必须严格按当前用户和当前会话过滤。
+评测结论简述：
 
-聊天时选择 `modelType=2` 会进入 Go 侧 Milvus RAG：
+- Markdown 切分后，`doc@5` 达到 `1.0`，`anchor@5` 达到 `0.9917`。
+- 引入 rerank 后，`anchor@5` 提升到 `1.0`。
+- RRF + rerank 保留了 dense / BM25 / rerank 分数，便于后续观测和调参。
+
+详细实验记录见：
 
 ```text
-用户问题
--> Go 生成 query embedding
--> Milvus 按 user_name + session_id 检索
--> 拼接参考资料
--> 调用聊天 LLM
+test/rag-eval/chunking-strategy-experiment-summary.md
+test/rag-eval/retrieval-fusion-rerank-summary.md
 ```
 
-默认 RAG 参数：
+### Tools 与 Skills
+
+SmartModel 支持自动工具调用，前端会把调用过程展示为可折叠工具卡片，包含参数、结果预览、状态、耗时和重试次数。
+
+当前能力包括：
+
+- 时间、计算、网页抓取、搜索、文档列表、会话文档检索等全局工具。
+- Skills 下拉选择，当前支持编程、数据分析、翻译、写作等技能。
+- `run_python` 仅在编程 / 数据分析技能启用后可见。
+- 工具调用记录会写入 `tool_invocations`，并带有 `trace_id`，方便排查。
+
+## 配置说明
+
+主要配置文件：
 
 ```text
-RAG_TOP_K=5
-RAG_MAX_CONTEXT_CHARS=6000
-RAG_RETRIEVAL_FAIL_OPEN=false
+config/config.toml                 # Go 服务基础配置
+config/.env                        # Go 侧 LLM / embedding / Milvus / RAG 配置
+workers/document-indexer/.env      # Python Worker 索引配置
+vue-frontend/vue.config.js         # 前端代理配置
 ```
 
-## 可观测性
+示例文件：
 
-当前已经保留了几个开发期排障入口：
+```text
+config/.env.example
+workers/document-indexer/.env.example
+```
 
-- Go 日志：`logs/go/gopherai.log`
-- Python Worker 日志：`logs/python/document-indexer.log`
-- RabbitMQ 管理台：`http://localhost:15672`
-- Attu Milvus GUI：`http://localhost:8000`
-- 文档查询接口：`GET /api/v1/documents`、`GET /api/v1/documents/:id`
-- 上传链路使用 `trace_id` 串联 Go 日志、MQ 消息、MySQL 记录和 Worker 日志。
+不要提交真实 API Key。
 
-后续会继续补齐更系统的可观测体系和测试计划。
+## 本地运行
 
-## 本地启动
-
-建议按这个顺序启动：
+建议启动顺序：
 
 ```text
 Docker 基础设施 -> Go 后端 -> Python Worker -> Vue 前端
@@ -198,29 +205,27 @@ cd D:\work\Go\GopherAI\workers\document-indexer
 python main.py
 ```
 
-### 4. 启动 Vue 前端
-
-首次安装依赖：
+### 4. 启动前端
 
 ```powershell
 cd D:\work\Go\GopherAI\vue-frontend
 npm install
-```
-
-启动开发服务器：
-
-```powershell
-cd D:\work\Go\GopherAI\vue-frontend
 npm run serve
 ```
 
-默认访问：
+默认地址：
 
 ```text
 http://localhost:8080
 ```
 
-### 5. 访问可视化工具
+前端代理：
+
+```text
+/api -> http://localhost:9090/api/v1
+```
+
+可视化工具：
 
 ```text
 RabbitMQ: http://localhost:15672
@@ -229,53 +234,64 @@ Attu:     http://localhost:8000
 
 ## 快速验证
 
-上传并等待索引完成：
+### 后端和前端检查
+
+```powershell
+cd D:\work\Go\GopherAI
+go test ./...
+go build -buildvcs=false ./...
+```
+
+```powershell
+cd D:\work\Go\GopherAI\vue-frontend
+npm run lint
+npm run build
+```
+
+### RAG 手动验证
+
+启动 Go、Python Worker、Milvus、RabbitMQ 后：
+
+1. 登录前端。
+2. 新建或选择一个会话。
+3. 上传 `.md` 或 `.txt` 文档。
+4. 等待文档索引完成。
+5. 在同一个会话中提问文档相关问题。
+
+也可以使用手动 smoke 脚本：
 
 ```powershell
 cd D:\work\Go\GopherAI
 powershell -ExecutionPolicy Bypass -File .\test\manual\upload-rag-smoke.ps1
-```
-
-成功时文档状态应从 `queued` 变为 `indexed`，并且 `chunk_count` 大于 0。
-
-随后使用返回的 `session_id` 测试 RAG 聊天：
-
-```powershell
-cd D:\work\Go\GopherAI
 powershell -ExecutionPolicy Bypass -File .\test\manual\chat-rag-smoke.ps1 -SessionID "<upload script returned session_id>"
 ```
 
-成功时回答中应包含：
+## 项目目录
 
 ```text
-gopherai-milvus-smoke-anchor-20260504
+common/                      Go 公共能力：LLM、RAG、MCP、Skill、RabbitMQ 等
+controller/                  HTTP Controller
+service/                     业务逻辑
+dao/                         数据访问
+model/                       数据模型
+config/                      Go 配置
+workers/document-indexer/    Python 文档索引 Worker
+vue-frontend/                Vue 前端
+deploy/                      Docker Compose 基础设施
+test/rag-eval/               RAG 评测配置与实验结果
+test/manual/                 手动 smoke test
+doc/                         设计文档和阶段记录
 ```
 
-也可以在 Attu 中查看：
+## 当前阶段总结
 
-```text
-collection: gopherai_document_chunks_v1
-```
+GopherAI 当前已经具备一个可演示的 LLM 应用闭环：
 
-## 测试语料
+- 有用户和会话体系。
+- 有会话级文档上传和异步索引。
+- 有 Milvus 检索、BM25 融合和 rerank。
+- 有 SmartModel 工具调用与 Skills。
+- 有前端流式交互和工具调用可视化。
+- 有可复现实验记录支撑 RAG 策略选择。
 
-后续 RAG 召回评估使用的测试语料放在：
-
-```text
-test/rag-corpus/
-```
-
-生成规范见：
-
-```text
-test/rag-corpus-generation-guide.md
-```
-
-## 相关文档
-
-- `doc/async-rag-local-runbook.md`：本地异步 RAG 链路启动与联调
-- `doc/milvus-indexing-plan.md`：Milvus 文档索引设计
-- `doc/go-milvus-rag-retrieval-plan.md`：Go 侧 Milvus RAG 检索链路设计
-- `doc/attu-milvus-ui-runbook.md`：Attu 可视化工具使用说明
-- `doc/gopherai-rag-context-handoff.md`：当前 RAG / Milvus 阶段上下文沉淀
-- `test/rag-corpus-generation-guide.md`：后续召回评估测试语料生成指南
+后续可以继续完善：更系统的观测面板、更多文件格式解析、查询改写、更完整的测试覆盖，以及面向真实使用场景的产品化体验。
