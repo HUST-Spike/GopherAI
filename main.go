@@ -98,9 +98,6 @@ func main() {
 	if err := godotenv.Load("config/.env"); err != nil {
 		log.Printf("config/.env not loaded: %v", err)
 	}
-	if err := godotenv.Load("workers/document-indexer/.env"); err != nil {
-		log.Printf("workers/document-indexer/.env not loaded: %v", err)
-	}
 
 	conf := config.GetConfig()
 

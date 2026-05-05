@@ -6,9 +6,10 @@ from typing import Tuple
 from dotenv import load_dotenv
 
 
-load_dotenv()
-
 DEFAULT_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+WORKER_ENV_PATH = Path(__file__).resolve().with_name(".env")
+
+load_dotenv(WORKER_ENV_PATH)
 
 
 @dataclass(frozen=True)
@@ -68,8 +69,8 @@ def load_config() -> WorkerConfig:
         milvus_uri=os.getenv("MILVUS_URI", "http://127.0.0.1:19530"),
         milvus_collection=os.getenv("MILVUS_COLLECTION", "gopherai_document_chunks_v1"),
         milvus_insert_batch_size=int(os.getenv("MILVUS_INSERT_BATCH_SIZE", "64")),
-        chunk_size=int(os.getenv("CHUNK_SIZE", "800")),
-        chunk_overlap=int(os.getenv("CHUNK_OVERLAP", "120")),
+        chunk_size=int(os.getenv("CHUNK_SIZE", "1000")),
+        chunk_overlap=int(os.getenv("CHUNK_OVERLAP", "150")),
         index_max_attempts=int(os.getenv("INDEX_MAX_ATTEMPTS", "3")),
         index_retry_delays=_parse_retry_delays(os.getenv("INDEX_RETRY_DELAYS", "2,5")),
     )
