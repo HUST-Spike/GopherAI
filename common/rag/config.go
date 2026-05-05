@@ -16,6 +16,11 @@ const (
 	defaultRetrievalFailOpen  = false
 	defaultMilvusVectorField  = "embedding"
 	defaultMilvusSearchHNSWEF = 64
+	defaultRerankProvider     = "zhipu"
+	defaultRerankModel        = "rerank"
+	defaultRerankBaseURL      = "https://open.bigmodel.cn/api/paas/v4"
+	defaultRerankTimeoutSec   = 30
+	defaultRerankScoreMode    = "rerank_only"
 )
 
 type Config struct {
@@ -27,12 +32,24 @@ type Config struct {
 	EmbeddingModel     string
 	EmbeddingDimension int
 	TopK               int
+	RetrievalTopK      int
+	FinalTopK          int
 	MaxContextChars    int
 	RetrievalFailOpen  bool
 	MilvusSearchHNSWEF int
+	RerankEnabled      bool
+	RerankProvider     string
+	RerankModel        string
+	RerankBaseURL      string
+	RerankAPIKey       string
+	RerankTimeoutSec   int
+	RerankMaxDocChars  int
+	RerankScoreMode    string
+	RerankFailOpen     bool
 }
 
 func LoadConfigFromEnv() Config {
+	topK := getenvInt("RAG_TOP_K", defaultTopK)
 	return Config{
 		MilvusURI:          getenv("MILVUS_URI", defaultMilvusURI),
 		MilvusCollection:   getenv("MILVUS_COLLECTION", defaultMilvusCollection),
@@ -41,10 +58,21 @@ func LoadConfigFromEnv() Config {
 		EmbeddingBaseURL:   getenv("EMBEDDING_BASE_URL", defaultEmbeddingBaseURL),
 		EmbeddingModel:     getenv("EMBEDDING_MODEL", defaultEmbeddingModel),
 		EmbeddingDimension: getenvInt("EMBEDDING_DIMENSION", defaultEmbeddingDimension),
-		TopK:               getenvInt("RAG_TOP_K", defaultTopK),
+		TopK:               topK,
+		RetrievalTopK:      getenvInt("RAG_RETRIEVAL_TOP_K", topK),
+		FinalTopK:          getenvInt("RAG_FINAL_TOP_K", topK),
 		MaxContextChars:    getenvInt("RAG_MAX_CONTEXT_CHARS", defaultMaxContextChars),
 		RetrievalFailOpen:  getenvBool("RAG_RETRIEVAL_FAIL_OPEN", defaultRetrievalFailOpen),
 		MilvusSearchHNSWEF: getenvInt("MILVUS_SEARCH_HNSW_EF", defaultMilvusSearchHNSWEF),
+		RerankEnabled:      getenvBool("RAG_RERANK_ENABLED", false),
+		RerankProvider:     getenv("RAG_RERANK_PROVIDER", defaultRerankProvider),
+		RerankModel:        getenv("RAG_RERANK_MODEL", defaultRerankModel),
+		RerankBaseURL:      getenv("RAG_RERANK_BASE_URL", defaultRerankBaseURL),
+		RerankAPIKey:       os.Getenv("RAG_RERANK_API_KEY"),
+		RerankTimeoutSec:   getenvInt("RAG_RERANK_TIMEOUT_SECONDS", defaultRerankTimeoutSec),
+		RerankMaxDocChars:  getenvNonNegativeInt("RAG_RERANK_MAX_DOCUMENT_CHARS", 0),
+		RerankScoreMode:    getenv("RAG_RERANK_SCORE_MODE", defaultRerankScoreMode),
+		RerankFailOpen:     getenvBool("RAG_RERANK_FAIL_OPEN", false),
 	}
 }
 
@@ -74,6 +102,18 @@ func getenvBool(key string, fallback bool) bool {
 	}
 	parsed, err := strconv.ParseBool(value)
 	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func getenvNonNegativeInt(key string, fallback int) int {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.Atoi(value)
+	if err != nil || parsed < 0 {
 		return fallback
 	}
 	return parsed

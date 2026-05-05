@@ -20,11 +20,16 @@ type RetrievedChunk struct {
 	ChunkIndex       int
 	Content          string
 	Score            float64
+	VectorScore      float64
+	VectorRank       int
+	RerankScore      float64
+	RerankRank       int
 }
 
 type Retriever struct {
 	cfg      Config
 	embedder *Embedder
+	reranker *Reranker
 }
 
 func NewRetriever(cfg Config) (*Retriever, error) {
@@ -44,10 +49,27 @@ func NewRetriever(cfg Config) (*Retriever, error) {
 	if cfg.TopK <= 0 {
 		cfg.TopK = defaultTopK
 	}
+	if cfg.FinalTopK <= 0 {
+		cfg.FinalTopK = cfg.TopK
+	}
+	if cfg.RetrievalTopK <= 0 {
+		cfg.RetrievalTopK = cfg.FinalTopK
+	}
+	if cfg.RerankEnabled && cfg.RetrievalTopK < cfg.FinalTopK {
+		cfg.RetrievalTopK = cfg.FinalTopK
+	}
 	if cfg.MilvusSearchHNSWEF <= 0 {
 		cfg.MilvusSearchHNSWEF = defaultMilvusSearchHNSWEF
 	}
-	return &Retriever{cfg: cfg, embedder: embedder}, nil
+	var reranker *Reranker
+	if cfg.RerankEnabled {
+		var err error
+		reranker, err = NewReranker(cfg)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &Retriever{cfg: cfg, embedder: embedder, reranker: reranker}, nil
 }
 
 func (r *Retriever) Retrieve(ctx context.Context, username string, sessionID string, query string) ([]RetrievedChunk, error) {
@@ -75,9 +97,13 @@ func (r *Retriever) Retrieve(ctx context.Context, username string, sessionID str
 		}
 	}()
 
+	searchTopK := r.cfg.FinalTopK
+	if r.cfg.RerankEnabled {
+		searchTopK = r.cfg.RetrievalTopK
+	}
 	searchOption := milvusclient.NewSearchOption(
 		r.cfg.MilvusCollection,
-		r.cfg.TopK,
+		searchTopK,
 		[]entity.Vector{entity.FloatVector(queryVector)},
 	).
 		WithANNSField(r.cfg.MilvusVectorField).
@@ -120,30 +146,56 @@ func (r *Retriever) Retrieve(ctx context.Context, username string, sessionID str
 			SessionID:        getString(resultSet.GetColumn("session_id"), i),
 			ChunkIndex:       getInt(resultSet.GetColumn("chunk_index"), i),
 			Content:          getString(resultSet.GetColumn("content"), i),
+			VectorRank:       i + 1,
 		}
 		if chunk.ChunkID == "" {
 			chunk.ChunkID = getString(resultSet.GetColumn("chunk_id"), i)
 		}
 		if i < len(resultSet.Scores) {
 			chunk.Score = float64(resultSet.Scores[i])
+			chunk.VectorScore = chunk.Score
 		}
 		chunks = append(chunks, chunk)
 	}
+
+	if r.cfg.RerankEnabled {
+		reranked, err := r.reranker.Rerank(ctx, query, chunks)
+		if err != nil {
+			if !r.cfg.RerankFailOpen {
+				return nil, err
+			}
+			log.Printf("rag_rerank_failed fail_open=true error=%v", err)
+		} else {
+			chunks = reranked
+		}
+	}
+	if len(chunks) > r.cfg.FinalTopK {
+		chunks = chunks[:r.cfg.FinalTopK]
+	}
+
 	firstScore := 0.0
 	firstChunkID := ""
+	firstVectorScore := 0.0
+	firstRerankScore := 0.0
 	if len(chunks) > 0 {
 		firstScore = chunks[0].Score
 		firstChunkID = chunks[0].ChunkID
+		firstVectorScore = chunks[0].VectorScore
+		firstRerankScore = chunks[0].RerankScore
 	}
 	log.Printf(
-		"milvus_rag_retrieved user=%s session_id=%s collection=%s top_k=%d chunk_count=%d first_chunk_id=%s first_score=%.4f",
+		"milvus_rag_retrieved user=%s session_id=%s collection=%s retrieval_top_k=%d final_top_k=%d rerank_enabled=%t chunk_count=%d first_chunk_id=%s first_score=%.4f first_vector_score=%.4f first_rerank_score=%.4f",
 		username,
 		sessionID,
 		r.cfg.MilvusCollection,
-		r.cfg.TopK,
+		searchTopK,
+		r.cfg.FinalTopK,
+		r.cfg.RerankEnabled,
 		len(chunks),
 		firstChunkID,
 		firstScore,
+		firstVectorScore,
+		firstRerankScore,
 	)
 	return chunks, nil
 }
