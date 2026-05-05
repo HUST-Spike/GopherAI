@@ -106,15 +106,11 @@ type Config struct {
 }
 
 type RedisKeyConfig struct {
-	CaptchaPrefix   string
-	IndexName       string
-	IndexNamePrefix string
+	CaptchaPrefix string
 }
 
 var DefaultRedisKeyConfig = RedisKeyConfig{
-	CaptchaPrefix:   "captcha:%s",
-	IndexName:       "rag_docs:%s:idx",
-	IndexNamePrefix: "rag_docs:%s:",
+	CaptchaPrefix: "captcha:%s",
 }
 
 var (

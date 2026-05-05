@@ -41,7 +41,8 @@ func CreateSessionAndSendMessage(userName string, userQuestion string, modelType
 
 	manager := aihelper.GetGlobalManager()
 	cfg := map[string]interface{}{
-		"username": userName,
+		"username":  userName,
+		"sessionID": createdSession.ID,
 	}
 	helper, err := manager.GetOrCreateAIHelper(userName, createdSession.ID, modelType, cfg)
 	if err != nil {
@@ -83,7 +84,8 @@ func StreamMessageToExistingSession(userName string, sessionID string, userQuest
 
 	manager := aihelper.GetGlobalManager()
 	cfg := map[string]interface{}{
-		"username": userName,
+		"username":  userName,
+		"sessionID": sessionID,
 	}
 	helper, err := manager.GetOrCreateAIHelper(userName, sessionID, modelType, cfg)
 	if err != nil {
@@ -134,7 +136,8 @@ func CreateStreamSessionAndSendMessage(userName string, userQuestion string, mod
 func ChatSend(userName string, sessionID string, userQuestion string, modelType string) (string, code.Code) {
 	manager := aihelper.GetGlobalManager()
 	cfg := map[string]interface{}{
-		"username": userName,
+		"username":  userName,
+		"sessionID": sessionID,
 	}
 	helper, err := manager.GetOrCreateAIHelper(userName, sessionID, modelType, cfg)
 	if err != nil {

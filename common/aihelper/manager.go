@@ -29,7 +29,27 @@ func (m *AIHelperManager) GetOrCreateAIHelper(userName string, sessionID string,
 
 	helper, exists := userHelpers[sessionID]
 	if exists {
-		return helper, nil
+		if helper.GetModelType() == modelType {
+			return helper, nil
+		}
+		log.Printf("AIHelper model type changed, recreating helper user=%s session=%s old=%s new=%s", userName, sessionID, helper.GetModelType(), modelType)
+		messages := helper.GetMessages()
+		if err := helper.Close(); err != nil {
+			log.Printf("failed to close AIHelper for session %s: %v", sessionID, err)
+		}
+		delete(userHelpers, sessionID)
+
+		factory := GetGlobalFactory()
+		ctx := context.Background()
+		newHelper, err := factory.CreateAIHelper(ctx, modelType, sessionID, config)
+		if err != nil {
+			return nil, err
+		}
+		for _, msg := range messages {
+			newHelper.AddMessageWithRole(msg.Content, msg.UserName, msg.Role, false)
+		}
+		userHelpers[sessionID] = newHelper
+		return newHelper, nil
 	}
 
 	factory := GetGlobalFactory()

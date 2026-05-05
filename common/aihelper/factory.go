@@ -38,7 +38,11 @@ func (f *AIModelFactory) registerBuiltinCreators() {
 		if !ok {
 			return nil, fmt.Errorf("RAG model requires username")
 		}
-		return NewAliRAGModel(ctx, username)
+		sessionID, ok := config["sessionID"].(string)
+		if !ok || sessionID == "" {
+			return nil, fmt.Errorf("RAG model requires sessionID")
+		}
+		return NewMilvusRAGModel(ctx, username, sessionID)
 	}
 
 	f.creators["3"] = func(ctx context.Context, config map[string]interface{}) (AIModel, error) {
@@ -70,6 +74,12 @@ func (f *AIModelFactory) CreateAIModel(ctx context.Context, modelType string, co
 }
 
 func (f *AIModelFactory) CreateAIHelper(ctx context.Context, modelType string, sessionID string, config map[string]interface{}) (*AIHelper, error) {
+	if config == nil {
+		config = make(map[string]interface{})
+	}
+	if _, ok := config["sessionID"]; !ok {
+		config["sessionID"] = sessionID
+	}
 	aiModel, err := f.CreateAIModel(ctx, modelType, config)
 	if err != nil {
 		return nil, err

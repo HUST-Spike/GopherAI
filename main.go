@@ -54,7 +54,8 @@ func readDataFromDB() error {
 			modelType = config.GetConfig().AIModelConfig.DefaultModelType
 		}
 		cfg := map[string]interface{}{
-			"username": m.UserName,
+			"username":  m.UserName,
+			"sessionID": m.SessionID,
 		}
 
 		helper, err := manager.GetOrCreateAIHelper(m.UserName, m.SessionID, modelType, cfg)
@@ -96,6 +97,9 @@ func main() {
 
 	if err := godotenv.Load("config/.env"); err != nil {
 		log.Printf("config/.env not loaded: %v", err)
+	}
+	if err := godotenv.Load("workers/document-indexer/.env"); err != nil {
+		log.Printf("workers/document-indexer/.env not loaded: %v", err)
 	}
 
 	conf := config.GetConfig()

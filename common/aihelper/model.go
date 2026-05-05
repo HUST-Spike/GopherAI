@@ -1,8 +1,8 @@
 package aihelper
 
 import (
-	mcpclient "GopherAI/common/mcp/client"
 	mcpconv "GopherAI/common/mcp"
+	mcpclient "GopherAI/common/mcp/client"
 	"GopherAI/common/rag"
 	"GopherAI/config"
 	"context"
@@ -114,14 +114,16 @@ func (o *OllamaModel) StreamResponse(ctx context.Context, messages []*schema.Mes
 func (o *OllamaModel) GetModelType() string { return "4" }
 func (o *OllamaModel) Close() error         { return nil }
 
-// =================== RAG ===================
+// =================== Milvus RAG ===================
 
-type AliRAGModel struct {
-	llm      model.ToolCallingChatModel
-	username string
+type MilvusRAGModel struct {
+	llm       model.ToolCallingChatModel
+	username  string
+	sessionID string
+	ragConfig rag.Config
 }
 
-func NewAliRAGModel(ctx context.Context, username string) (*AliRAGModel, error) {
+func NewMilvusRAGModel(ctx context.Context, username string, sessionID string) (*MilvusRAGModel, error) {
 	key := os.Getenv("OPENAI_API_KEY")
 	conf := config.GetConfig()
 	modelName := conf.RagModelConfig.RagChatModelName
@@ -133,61 +135,76 @@ func NewAliRAGModel(ctx context.Context, username string) (*AliRAGModel, error) 
 		APIKey:  key,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("create ali rag model failed: %v", err)
+		return nil, fmt.Errorf("create milvus rag model failed: %v", err)
 	}
-	return &AliRAGModel{llm: llm, username: username}, nil
+	return &MilvusRAGModel{
+		llm:       llm,
+		username:  username,
+		sessionID: sessionID,
+		ragConfig: rag.LoadConfigFromEnv(),
+	}, nil
 }
 
-func (o *AliRAGModel) GenerateResponse(ctx context.Context, messages []*schema.Message) (*schema.Message, error) {
-	ragMessages, err := o.buildRAGMessages(ctx, messages)
+func (m *MilvusRAGModel) GenerateResponse(ctx context.Context, messages []*schema.Message) (*schema.Message, error) {
+	ragMessages, err := m.buildRAGMessages(ctx, messages)
 	if err != nil {
-		log.Printf("RAG enrichment failed, falling back to plain LLM: %v", err)
-		ragMessages = messages
+		if m.ragConfig.RetrievalFailOpen {
+			log.Printf("milvus rag enrichment failed, falling back to plain LLM: %v", err)
+			ragMessages = messages
+		} else {
+			return nil, err
+		}
 	}
-	resp, err := o.llm.Generate(ctx, ragMessages)
+	resp, err := m.llm.Generate(ctx, ragMessages)
 	if err != nil {
-		return nil, fmt.Errorf("ali rag generate failed: %v", err)
+		return nil, fmt.Errorf("milvus rag generate failed: %v", err)
 	}
 	return resp, nil
 }
 
-func (o *AliRAGModel) StreamResponse(ctx context.Context, messages []*schema.Message, cb StreamCallback) (string, error) {
-	ragMessages, err := o.buildRAGMessages(ctx, messages)
+func (m *MilvusRAGModel) StreamResponse(ctx context.Context, messages []*schema.Message, cb StreamCallback) (string, error) {
+	ragMessages, err := m.buildRAGMessages(ctx, messages)
 	if err != nil {
-		log.Printf("RAG enrichment failed, falling back to plain LLM: %v", err)
-		ragMessages = messages
+		if m.ragConfig.RetrievalFailOpen {
+			log.Printf("milvus rag enrichment failed, falling back to plain LLM: %v", err)
+			ragMessages = messages
+		} else {
+			return "", err
+		}
 	}
-	stream, err := o.llm.Stream(ctx, ragMessages)
+	stream, err := m.llm.Stream(ctx, ragMessages)
 	if err != nil {
-		return "", fmt.Errorf("ali rag stream failed: %v", err)
+		return "", fmt.Errorf("milvus rag stream failed: %v", err)
 	}
 	_, text, err := drainStream(stream, cb)
 	if err != nil {
-		return text, fmt.Errorf("ali rag stream recv failed: %v", err)
+		return text, fmt.Errorf("milvus rag stream recv failed: %v", err)
 	}
 	return text, nil
 }
 
-// buildRAGMessages retrieves documents and injects them into the last user message.
-func (o *AliRAGModel) buildRAGMessages(ctx context.Context, messages []*schema.Message) ([]*schema.Message, error) {
+func (m *MilvusRAGModel) buildRAGMessages(ctx context.Context, messages []*schema.Message) ([]*schema.Message, error) {
 	if len(messages) == 0 {
 		return nil, fmt.Errorf("no messages provided")
-	}
-
-	ragQuery, err := rag.NewRAGQuery(ctx, o.username)
-	if err != nil {
-		return nil, err
 	}
 
 	lastMessage := messages[len(messages)-1]
 	query := lastMessage.Content
 
-	docs, err := ragQuery.RetrieveDocuments(ctx, query)
+	retriever, err := rag.NewRetriever(m.ragConfig)
+	if err != nil {
+		return nil, err
+	}
+	chunks, err := retriever.Retrieve(ctx, m.username, m.sessionID, query)
 	if err != nil {
 		return nil, err
 	}
 
-	ragPrompt := rag.BuildRAGPrompt(query, docs)
+	ragPrompt, err := rag.BuildPrompt(query, chunks, m.ragConfig.MaxContextChars)
+	if err != nil {
+		return nil, err
+	}
+
 	enriched := make([]*schema.Message, len(messages))
 	copy(enriched, messages)
 	enriched[len(enriched)-1] = &schema.Message{
@@ -197,21 +214,21 @@ func (o *AliRAGModel) buildRAGMessages(ctx context.Context, messages []*schema.M
 	return enriched, nil
 }
 
-func (o *AliRAGModel) GetModelType() string { return "2" }
-func (o *AliRAGModel) Close() error         { return nil }
+func (m *MilvusRAGModel) GetModelType() string { return "2" }
+func (m *MilvusRAGModel) Close() error         { return nil }
 
 // =================== MCP (Native Function Calling) ===================
 
 const mcpMaxToolRounds = 10
 
 type MCPModel struct {
-	baseLLM   model.ToolCallingChatModel
-	toolLLM   model.ToolCallingChatModel
-	client    *mcpclient.MCPClient
-	mcpURL    string
-	username  string
-	tools     []mcp.Tool
-	mu        sync.Mutex
+	baseLLM  model.ToolCallingChatModel
+	toolLLM  model.ToolCallingChatModel
+	client   *mcpclient.MCPClient
+	mcpURL   string
+	username string
+	tools    []mcp.Tool
+	mu       sync.Mutex
 }
 
 func NewMCPModel(ctx context.Context, username string) (*MCPModel, error) {
