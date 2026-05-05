@@ -222,16 +222,17 @@ func (m *MilvusRAGModel) Close() error         { return nil }
 const mcpMaxToolRounds = 10
 
 type MCPModel struct {
-	baseLLM  model.ToolCallingChatModel
-	toolLLM  model.ToolCallingChatModel
-	client   *mcpclient.MCPClient
-	mcpURL   string
-	username string
-	tools    []mcp.Tool
-	mu       sync.Mutex
+	baseLLM   model.ToolCallingChatModel
+	toolLLM   model.ToolCallingChatModel
+	client    *mcpclient.MCPClient
+	mcpURL    string
+	username  string
+	sessionID string
+	tools     []mcp.Tool
+	mu        sync.Mutex
 }
 
-func NewMCPModel(ctx context.Context, username string) (*MCPModel, error) {
+func NewMCPModel(ctx context.Context, username string, sessionID string) (*MCPModel, error) {
 	key := os.Getenv("OPENAI_API_KEY")
 	conf := config.GetConfig()
 
@@ -251,10 +252,11 @@ func NewMCPModel(ctx context.Context, username string) (*MCPModel, error) {
 	}
 
 	m := &MCPModel{
-		baseLLM:  llm,
-		client:   client,
-		mcpURL:   mcpURL,
-		username: username,
+		baseLLM:   llm,
+		client:    client,
+		mcpURL:    mcpURL,
+		username:  username,
+		sessionID: sessionID,
 	}
 
 	if err := m.discoverAndBindTools(ctx); err != nil {
@@ -368,7 +370,16 @@ func (m *MCPModel) StreamResponse(ctx context.Context, messages []*schema.Messag
 
 // executeToolCalls calls each tool on the MCP server and returns Tool-role messages.
 // Errors are captured per-tool rather than aborting the whole batch.
+//
+// The caller's ctx is enriched with a ToolCtx so MCP server-side handlers can
+// identify the originating user/session. The trace_id field is left empty
+// here; Step 8 of the overhaul plan wires per-request trace_id end-to-end.
 func (m *MCPModel) executeToolCalls(ctx context.Context, toolCalls []schema.ToolCall) []*schema.Message {
+	callCtx := mcpconv.WithToolCtx(ctx, mcpconv.ToolCtx{
+		UserName:  m.username,
+		SessionID: m.sessionID,
+	})
+
 	results := make([]*schema.Message, 0, len(toolCalls))
 	for _, tc := range toolCalls {
 		var args map[string]interface{}
@@ -382,7 +393,7 @@ func (m *MCPModel) executeToolCalls(ctx context.Context, toolCalls []schema.Tool
 			}
 		}
 
-		result, err := m.client.CallTool(ctx, tc.Function.Name, args)
+		result, err := m.client.CallTool(callCtx, tc.Function.Name, args)
 		if err != nil {
 			results = append(results, &schema.Message{
 				Role: schema.Tool, ToolCallID: tc.ID, ToolName: tc.Function.Name,

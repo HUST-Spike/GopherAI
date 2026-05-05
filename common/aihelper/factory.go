@@ -50,7 +50,11 @@ func (f *AIModelFactory) registerBuiltinCreators() {
 		if !ok {
 			return nil, fmt.Errorf("MCP model requires username")
 		}
-		return NewMCPModel(ctx, username)
+		sessionID, ok := config["sessionID"].(string)
+		if !ok || sessionID == "" {
+			return nil, fmt.Errorf("MCP model requires sessionID")
+		}
+		return NewMCPModel(ctx, username, sessionID)
 	}
 
 	f.creators["4"] = func(ctx context.Context, config map[string]interface{}) (AIModel, error) {

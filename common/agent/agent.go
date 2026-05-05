@@ -26,6 +26,12 @@ type Agent struct {
 	Tools       []mcp.Tool
 	MaxSteps    int
 	Memory      *Memory
+
+	// UserName / SessionID identify the originator of every tool call this
+	// Agent makes. They are forwarded to the MCP server via the ToolCtx
+	// channel and are NOT exposed to the LLM.
+	UserName  string
+	SessionID string
 }
 
 type AgentConfig struct {
@@ -35,6 +41,8 @@ type AgentConfig struct {
 	MCPClient   *mcpclient.MCPClient
 	Tools       []mcp.Tool
 	MaxSteps    int
+	UserName    string
+	SessionID   string
 }
 
 func NewAgent(cfg AgentConfig) (*Agent, error) {
@@ -50,6 +58,8 @@ func NewAgent(cfg AgentConfig) (*Agent, error) {
 		Tools:       cfg.Tools,
 		MaxSteps:    maxSteps,
 		Memory:      NewMemory(),
+		UserName:    cfg.UserName,
+		SessionID:   cfg.SessionID,
 	}, nil
 }
 
@@ -193,7 +203,12 @@ func (a *Agent) callTool(ctx context.Context, tc schema.ToolCall) (string, error
 		}
 	}
 
-	result, err := a.MCPClient.CallTool(ctx, tc.Function.Name, args)
+	callCtx := mcpconv.WithToolCtx(ctx, mcpconv.ToolCtx{
+		UserName:  a.UserName,
+		SessionID: a.SessionID,
+	})
+
+	result, err := a.MCPClient.CallTool(callCtx, tc.Function.Name, args)
 	if err != nil {
 		return "", err
 	}

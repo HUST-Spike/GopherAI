@@ -1,6 +1,7 @@
 package mcpclient
 
 import (
+	mcpconv "GopherAI/common/mcp"
 	"context"
 	"fmt"
 
@@ -54,7 +55,17 @@ func (m *MCPClient) ListTools(ctx context.Context) (*mcp.ListToolsResult, error)
 	return m.c.ListTools(ctx, mcp.ListToolsRequest{})
 }
 
+// CallTool invokes a tool on the connected MCP server.
+//
+// If the caller has attached a ToolCtx to ctx via mcpconv.WithToolCtx, the
+// client transparently merges it into args under the reserved `_ctx` key so
+// server-side handlers can identify the originating user/session/trace
+// without exposing those fields to the LLM. The original args map is not
+// mutated.
 func (m *MCPClient) CallTool(ctx context.Context, toolName string, args map[string]any) (*mcp.CallToolResult, error) {
+	if tc, ok := mcpconv.ToolCtxFrom(ctx); ok {
+		args = mcpconv.InjectCtxIntoArgs(args, tc)
+	}
 	callReq := mcp.CallToolRequest{
 		Params: mcp.CallToolParams{
 			Name:      toolName,

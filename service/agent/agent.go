@@ -21,7 +21,7 @@ var (
 	agents   = make(map[string]*agent.Agent)
 )
 
-func getOrCreateAgent(ctx context.Context, sessionID string) (*agent.Agent, error) {
+func getOrCreateAgent(ctx context.Context, userName string, sessionID string) (*agent.Agent, error) {
 	agentsMu.RLock()
 	if a, ok := agents[sessionID]; ok {
 		agentsMu.RUnlock()
@@ -64,6 +64,8 @@ func getOrCreateAgent(ctx context.Context, sessionID string) (*agent.Agent, erro
 		MCPClient:   client,
 		Tools:       toolsResult.Tools,
 		MaxSteps:    15,
+		UserName:    userName,
+		SessionID:   sessionID,
 	})
 	if err != nil {
 		return nil, err
@@ -75,7 +77,7 @@ func getOrCreateAgent(ctx context.Context, sessionID string) (*agent.Agent, erro
 
 func ExecuteTask(userName string, sessionID string, task string) (*agent.AgentResult, code.Code) {
 	ctx := context.Background()
-	a, err := getOrCreateAgent(ctx, sessionID)
+	a, err := getOrCreateAgent(ctx, userName, sessionID)
 	if err != nil {
 		log.Printf("ExecuteTask getOrCreateAgent error: %v", err)
 		return nil, code.AIModelFail
@@ -103,7 +105,7 @@ func StreamExecuteTask(userName string, sessionID string, task string, writer ht
 	}
 
 	ctx := context.Background()
-	a, err := getOrCreateAgent(ctx, sessionID)
+	a, err := getOrCreateAgent(ctx, userName, sessionID)
 	if err != nil {
 		log.Printf("StreamExecuteTask getOrCreateAgent error: %v", err)
 		return code.AIModelFail
