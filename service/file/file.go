@@ -162,7 +162,14 @@ func UploadRagFile(username string, file *multipart.FileHeader, sessionID string
 }
 
 func ensureUploadSession(username string, sessionID string, originalFilename string, conf *config.Config) (string, error) {
-	if strings.TrimSpace(sessionID) != "" {
+	if sessionID = strings.TrimSpace(sessionID); sessionID != "" {
+		existing, err := sessiondao.GetSessionByID(sessionID)
+		if err != nil {
+			return "", err
+		}
+		if existing.UserName != username {
+			return "", errors.New("session does not belong to current user")
+		}
 		return sessionID, nil
 	}
 

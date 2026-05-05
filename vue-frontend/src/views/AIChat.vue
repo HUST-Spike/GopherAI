@@ -962,6 +962,9 @@ export default {
         uploading.value = true
         const formData = new FormData()
         formData.append('file', file)
+        if (currentSessionId.value && currentSessionId.value !== 'temp' && !tempSession.value) {
+          formData.append('session_id', currentSessionId.value)
+        }
 
         const response = await api.post('/file/upload', formData, {
           headers: {
@@ -970,6 +973,26 @@ export default {
         })
 
         if (response.data && response.data.status_code === 1000) {
+          const uploadedSessionId = String(response.data.session_id || response.data.sessionId || '')
+          if (uploadedSessionId) {
+            const now = new Date().toISOString()
+            if (!sessions.value[uploadedSessionId]) {
+              sessions.value[uploadedSessionId] = {
+                id: uploadedSessionId,
+                name: makeSessionName(`Document: ${file.name}`),
+                updatedAt: now,
+                messages: []
+              }
+            } else {
+              sessions.value[uploadedSessionId].updatedAt = now
+            }
+            if (!currentSessionId.value || currentSessionId.value === 'temp' || tempSession.value) {
+              currentSessionId.value = uploadedSessionId
+              tempSession.value = false
+              currentMessages.value = [...(sessions.value[uploadedSessionId].messages || [])]
+              refreshActiveSkills(uploadedSessionId)
+            }
+          }
           ElMessage.success(`文件上传成功`)
         } else {
           ElMessage.error(response.data?.status_msg || '上传失败')

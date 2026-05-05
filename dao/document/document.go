@@ -9,7 +9,19 @@ import (
 )
 
 func CreateDocument(doc *model.Document) (*model.Document, error) {
-	err := mysql.DB.Create(doc).Error
+	if err := mysql.DB.Create(doc).Error; err != nil {
+		return doc, err
+	}
+	if doc.SessionID == "" {
+		return doc, nil
+	}
+	touchedAt := doc.CreatedAt
+	if touchedAt.IsZero() {
+		touchedAt = time.Now()
+	}
+	err := mysql.DB.Model(&model.Session{}).
+		Where("id = ?", doc.SessionID).
+		Update("updated_at", touchedAt).Error
 	return doc, err
 }
 
