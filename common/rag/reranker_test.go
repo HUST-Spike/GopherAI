@@ -39,3 +39,18 @@ func TestApplyRerankScoresUsesVectorRankAsTieBreaker(t *testing.T) {
 		t.Fatalf("tie should preserve vector rank, got %+v", ranked)
 	}
 }
+
+func TestApplyRerankScoresUsesBM25RankAsTieBreaker(t *testing.T) {
+	chunks := []RetrievedChunk{
+		{ChunkID: "bm25-only", BM25Rank: 1},
+		{ChunkID: "dense", VectorRank: 2},
+	}
+	ranked := applyRerankScores(chunks, map[int]float64{
+		0: 0.9,
+		1: 0.9,
+	})
+
+	if ranked[0].ChunkID != "bm25-only" {
+		t.Fatalf("expected BM25-only hit to use BM25 rank as tie breaker, got %+v", ranked)
+	}
+}

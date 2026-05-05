@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Iterable
 
-from pymilvus import DataType, MilvusClient
+from pymilvus import DataType, Function, FunctionType, MilvusClient
 
 from config import WorkerConfig
 
@@ -31,13 +31,29 @@ class MilvusDocumentChunkStore:
         schema.add_field("source_type", DataType.VARCHAR, max_length=30)
         schema.add_field("index_version", DataType.INT64)
         schema.add_field("chunk_index", DataType.INT64)
-        schema.add_field("content", DataType.VARCHAR, max_length=8192)
+        schema.add_field(
+            "content",
+            DataType.VARCHAR,
+            max_length=8192,
+            enable_analyzer=self.config.milvus_bm25_enabled,
+            analyzer_params={"type": "chinese"} if self.config.milvus_bm25_enabled else None,
+        )
         schema.add_field("content_sha256", DataType.VARCHAR, max_length=64)
         schema.add_field("embedding_model", DataType.VARCHAR, max_length=100)
         schema.add_field("embedding_dimension", DataType.INT64)
         schema.add_field("metadata_json", DataType.VARCHAR, max_length=4096)
         schema.add_field("created_at_unix", DataType.INT64)
         schema.add_field("embedding", DataType.FLOAT_VECTOR, dim=self.config.embedding_dimension)
+        if self.config.milvus_bm25_enabled:
+            schema.add_field(self.config.milvus_bm25_sparse_field, DataType.SPARSE_FLOAT_VECTOR)
+            schema.add_function(
+                Function(
+                    name=self.config.milvus_bm25_function_name,
+                    function_type=FunctionType.BM25,
+                    input_field_names=["content"],
+                    output_field_names=[self.config.milvus_bm25_sparse_field],
+                )
+            )
 
         index_params = MilvusClient.prepare_index_params()
         index_params.add_index(
@@ -46,6 +62,13 @@ class MilvusDocumentChunkStore:
             metric_type="COSINE",
             params={"M": 16, "efConstruction": 200},
         )
+        if self.config.milvus_bm25_enabled:
+            index_params.add_index(
+                field_name=self.config.milvus_bm25_sparse_field,
+                index_type="SPARSE_INVERTED_INDEX",
+                metric_type="BM25",
+                params={"drop_ratio_build": self.config.milvus_bm25_drop_ratio_build},
+            )
 
         self.client.create_collection(
             collection_name=self.config.milvus_collection,
@@ -65,6 +88,13 @@ class MilvusDocumentChunkStore:
         embedding_field = next((field for field in fields if field.get("name") == "embedding"), None)
         if embedding_field is None:
             raise RuntimeError(f"Milvus collection {self.config.milvus_collection} missing embedding field")
+        if self.config.milvus_bm25_enabled:
+            sparse_field = next((field for field in fields if field.get("name") == self.config.milvus_bm25_sparse_field), None)
+            if sparse_field is None:
+                raise RuntimeError(
+                    f"Milvus collection {self.config.milvus_collection} missing BM25 sparse field "
+                    f"{self.config.milvus_bm25_sparse_field}. Recreate/reindex the collection or set MILVUS_BM25_ENABLED=false."
+                )
 
         params = embedding_field.get("params") or {}
         dim = int(params.get("dim") or params.get("dimension") or 0)

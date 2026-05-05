@@ -135,7 +135,7 @@ func applyRerankScores(chunks []RetrievedChunk, scores map[int]float64) []Retrie
 	}
 	sort.SliceStable(ranked, func(i, j int) bool {
 		if ranked[i].RerankScore == ranked[j].RerankScore {
-			return ranked[i].VectorRank < ranked[j].VectorRank
+			return bestRank(ranked[i]) < bestRank(ranked[j])
 		}
 		return ranked[i].RerankScore > ranked[j].RerankScore
 	})

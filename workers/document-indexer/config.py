@@ -33,6 +33,10 @@ class WorkerConfig:
     milvus_uri: str
     milvus_collection: str
     milvus_insert_batch_size: int
+    milvus_bm25_enabled: bool
+    milvus_bm25_sparse_field: str
+    milvus_bm25_function_name: str
+    milvus_bm25_drop_ratio_build: float
     chunk_strategy: str
     chunk_size: int
     chunk_overlap: int
@@ -75,6 +79,10 @@ def load_config() -> WorkerConfig:
         milvus_uri=os.getenv("MILVUS_URI", "http://127.0.0.1:19530"),
         milvus_collection=os.getenv("MILVUS_COLLECTION", "gopherai_document_chunks_v1"),
         milvus_insert_batch_size=int(os.getenv("MILVUS_INSERT_BATCH_SIZE", "64")),
+        milvus_bm25_enabled=os.getenv("MILVUS_BM25_ENABLED", "false").lower() == "true",
+        milvus_bm25_sparse_field=os.getenv("MILVUS_BM25_SPARSE_FIELD", "content_sparse"),
+        milvus_bm25_function_name=os.getenv("MILVUS_BM25_FUNCTION_NAME", "content_bm25"),
+        milvus_bm25_drop_ratio_build=float(os.getenv("MILVUS_BM25_DROP_RATIO_BUILD", "0.2")),
         chunk_strategy=os.getenv("CHUNK_STRATEGY", "sentence_splitter"),
         chunk_size=int(os.getenv("CHUNK_SIZE", "1000")),
         chunk_overlap=int(os.getenv("CHUNK_OVERLAP", "150")),

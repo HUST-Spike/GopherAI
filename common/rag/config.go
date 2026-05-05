@@ -21,6 +21,10 @@ const (
 	defaultRerankBaseURL      = "https://open.bigmodel.cn/api/paas/v4"
 	defaultRerankTimeoutSec   = 30
 	defaultRerankScoreMode    = "rerank_only"
+	defaultFusionStrategy     = "rrf"
+	defaultBM25SparseField    = "content_sparse"
+	defaultRRFK               = 60
+	defaultRRFWeight          = 1.0
 )
 
 type Config struct {
@@ -34,9 +38,18 @@ type Config struct {
 	TopK               int
 	RetrievalTopK      int
 	FinalTopK          int
+	DenseTopK          int
+	BM25TopK           int
+	FusionTopK         int
 	MaxContextChars    int
 	RetrievalFailOpen  bool
 	MilvusSearchHNSWEF int
+	FusionEnabled      bool
+	FusionStrategy     string
+	BM25SparseField    string
+	RRFK               float64
+	RRFDenseWeight     float64
+	RRFBM25Weight      float64
 	RerankEnabled      bool
 	RerankProvider     string
 	RerankModel        string
@@ -61,9 +74,18 @@ func LoadConfigFromEnv() Config {
 		TopK:               topK,
 		RetrievalTopK:      getenvInt("RAG_RETRIEVAL_TOP_K", topK),
 		FinalTopK:          getenvInt("RAG_FINAL_TOP_K", topK),
+		DenseTopK:          getenvInt("RAG_DENSE_TOP_K", getenvInt("RAG_RETRIEVAL_TOP_K", topK)),
+		BM25TopK:           getenvInt("RAG_BM25_TOP_K", getenvInt("RAG_RETRIEVAL_TOP_K", topK)),
+		FusionTopK:         getenvInt("RAG_FUSION_TOP_K", getenvInt("RAG_RETRIEVAL_TOP_K", topK)),
 		MaxContextChars:    getenvInt("RAG_MAX_CONTEXT_CHARS", defaultMaxContextChars),
 		RetrievalFailOpen:  getenvBool("RAG_RETRIEVAL_FAIL_OPEN", defaultRetrievalFailOpen),
 		MilvusSearchHNSWEF: getenvInt("MILVUS_SEARCH_HNSW_EF", defaultMilvusSearchHNSWEF),
+		FusionEnabled:      getenvBool("RAG_FUSION_ENABLED", false),
+		FusionStrategy:     getenv("RAG_FUSION_STRATEGY", defaultFusionStrategy),
+		BM25SparseField:    getenv("RAG_BM25_SPARSE_FIELD", defaultBM25SparseField),
+		RRFK:               getenvFloat("RAG_RRF_K", defaultRRFK),
+		RRFDenseWeight:     getenvFloat("RAG_RRF_DENSE_WEIGHT", defaultRRFWeight),
+		RRFBM25Weight:      getenvFloat("RAG_RRF_BM25_WEIGHT", defaultRRFWeight),
 		RerankEnabled:      getenvBool("RAG_RERANK_ENABLED", false),
 		RerankProvider:     getenv("RAG_RERANK_PROVIDER", defaultRerankProvider),
 		RerankModel:        getenv("RAG_RERANK_MODEL", defaultRerankModel),
@@ -114,6 +136,18 @@ func getenvNonNegativeInt(key string, fallback int) int {
 	}
 	parsed, err := strconv.Atoi(value)
 	if err != nil || parsed < 0 {
+		return fallback
+	}
+	return parsed
+}
+
+func getenvFloat(key string, fallback float64) float64 {
+	value := os.Getenv(key)
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
 		return fallback
 	}
 	return parsed
