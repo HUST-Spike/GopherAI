@@ -21,7 +21,7 @@
     <!-- 右侧聊天区域 -->
     <div class="chat-section">
       <div class="top-bar">
-        <button class="back-btn" @click="$router.push('/menu')">← 返回</button>
+        <button class="back-btn" @click="handleLogout">退出登录</button>
         <button class="sync-btn" @click="syncHistory" :disabled="!currentSessionId || tempSession">同步历史数据</button>
         <label for="modelType">选择模型：</label>
         <select id="modelType" v-model="selectedModel" class="model-select">
@@ -84,12 +84,14 @@
 
 
 import { ref, nextTick, computed, onMounted } from 'vue'
-import { ElMessage } from 'element-plus'
+import { useRouter } from 'vue-router'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import api from '../utils/api'
 
 export default {
   name: 'AIChat',
   setup() {
+    const router = useRouter()
 
     const sessions = ref({})
     const currentSessionId = ref(null)
@@ -526,6 +528,21 @@ export default {
       }
     }
 
+    const handleLogout = async () => {
+      try {
+        await ElMessageBox.confirm('确定要退出登录吗？', '提示', {
+          confirmButtonText: '确定',
+          cancelButtonText: '取消',
+          type: 'warning'
+        })
+        localStorage.removeItem('token')
+        ElMessage.success('已退出登录')
+        router.push('/login')
+      } catch {
+        // user cancelled
+      }
+    }
+
     const handleFileUpload = async (event) => {
       const file = event.target.files[0]
       if (!file) return
@@ -594,7 +611,8 @@ export default {
       syncHistory,
       sendMessage,
       triggerFileUpload,
-      handleFileUpload
+      handleFileUpload,
+      handleLogout
     }
   }
 }

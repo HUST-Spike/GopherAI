@@ -88,7 +88,7 @@ export default {
         if (response.data.status_code === 1000) {
           localStorage.setItem('token', response.data.token)
           ElMessage.success('登录成功')
-          router.push('/menu')
+          router.push('/ai-chat')
         } else {
           ElMessage.error(response.data.status_msg || '登录失败')
         }
